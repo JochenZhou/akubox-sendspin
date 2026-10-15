@@ -175,6 +175,49 @@ sudo -u sendspin /usr/bin/sendspin-client -T   # 显示配对码
 ss -tlnp | grep 8928                      # 确认监听
 ```
 
+## 安装后改名（无需重新编译）
+
+```bash
+sudo bash rename.sh                    # 查看当前名称
+sudo bash rename.sh "卧室 AkuBox"       # 改成新名称
+```
+
+传名称给 `rename.sh` 会：更新配置 → 同步 systemd 单元参数 → 重启服务 → 校验新名称确实生效
+（读回客户端实际广播的名字，不是只看命令有没有报错），并先把配置和单元备份到
+`/root/sendspin-rename-backup.<时间戳>/`。
+
+也可以手动做这一步：
+
+```bash
+# 改这一行即可 —— systemd 单元里那个命令行参数其实是摆设（见下）
+sudo sed -i 's/^FRIENDLY_NAME=.*/FRIENDLY_NAME="卧室 AkuBox"/' \
+    /etc/sendspin-client/sendspin-client.conf
+sudo systemctl restart sendspin-client
+```
+
+**为什么改配置就够了**：上游 `main.cpp` 的取值顺序是
+
+```cpp
+std::string friendly_name = "Basic Client";
+if (config_parser.has_key("FRIENDLY_NAME")) {
+    friendly_name = config_parser.get_string("FRIENDLY_NAME", "Basic Client");
+} else if (optind < argc) {
+    friendly_name = argv[optind];   // 仅当配置里没有 FRIENDLY_NAME 时才用命令行参数
+}
+```
+
+配置**优先于**命令行参数。systemd 单元里的 `ExecStart=... "客厅 AkuBox"` 因此不生效，
+`rename.sh` 会顺手把它改成一致，只是为了以后看文件时不被误导。
+
+### 改名后 HA 里的实体名不会自动跟着变
+
+客户端侧改名会立刻生效（mDNS 广播名 + `client/hello` 上报名），MA 也会用新名字重新注册协议
+播放器。但 MA 的 **Universal Player 对象名称是创建时固定的**，不会跟随改名，所以 Home Assistant
+里的 `media_player` 实体名仍是 MA 侧记住的名称（`rename.sh` 结束时也会提示这一点）。
+
+要在 HA 里也换成新名，需在 Music Assistant 里改名：**设置 → 播放器 → 该设备 → 重命名**，
+或删除该播放器后重新添加（MA 会按新名称重建）。**不影响播放功能。**
+
 ## 卸载
 
 ```bash
@@ -225,6 +268,7 @@ nmcli con up <连接UUID>
 ```
 .
 ├── install.sh                               # 一键安装脚本
+├── rename.sh                                # 安装后改名（无需重新编译）
 ├── uninstall.sh                             # 卸载脚本
 ├── patches/
 │   ├── 0001-sendspin-cpp-legacy-ma-compat.patch   # 差异 1-6（Noise / hello / state / server 命令）
