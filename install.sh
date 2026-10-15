@@ -6,16 +6,20 @@
 #  TermeHansen/sendspin-client，让它作为 Music Assistant 官方附加组件的本地播放器
 #  （MA 主动发现并连接，无需修改 MA 服务端）。
 #
-#  内置 6 处与 Music Assistant 2.10.x（aiosendspin 9.1.1）的协议兼容补丁。
+#  内置 7 处与 Music Assistant 2.10.x（aiosendspin 9.1.1）的协议兼容补丁。
 #
 #  用法:
-#     sudo bash install.sh
-#     sudo bash install.sh --name "卧室 AkuBox"
-#     sudo bash install.sh --build-only          # 只编译不安装，用于验证
+#     sudo bash install.sh              # 交互向导：可改设备名、确认是否释放声卡
+#     sudo bash install.sh -y           # 全自动，不改设备名、不动其它服务
+#     sudo bash install.sh --free-audio -y
 #
 #  全部选项见 --help
 # ==============================================================================
-set -euo pipefail
+
+# 刻意不启用 pipefail：本脚本大量使用 `cmd | grep -q` 与 `cmd | head -1` 这类惯用法，
+# 读取端提前退出会让写入端收到 SIGPIPE（退出码 141），pipefail 会把整条管道判为失败。
+# 曾因此让「检测服务是否存在」的 if 分支永远走假，导致 --free-audio 静默失效。
+set -eu
 
 # ---------------------------- 版本锁定（可复现） ----------------------------
 UPSTREAM="https://github.com/TermeHansen/sendspin-client.git"
@@ -39,6 +43,7 @@ RAW_MIRRORS=(
 
 # ---------------------------- 默认参数 ----------------------------
 DEVICE_NAME="$(hostname 2>/dev/null || echo AkuBox)"
+NAME_GIVEN=0
 AUDIO_DEVICE=""
 ALSA_MIXER=""
 INSTALL_DIR="/opt/sendspin-client"
@@ -51,11 +56,17 @@ JOBS=1
 BUILD_ONLY=0
 SKIP_LEGACY_PATCH=0
 FREE_AUDIO=0
+FREE_AUDIO_EXPLICIT=0
 ASSUME_YES=0
 PATCH_DIR=""
 
-# 已知会占用声卡、与 sendspin 冲突的厂商服务
-AUDIO_CONFLICTS=("linux-voice-assistant" "showtime")
+# 可能与播放器争用声卡的厂商服务（仅供探测的候选名单）。
+# 并非每台 AkuBox 都装了这些，实际以系统上「存在」的为准，不存在就完全不会出现。
+AUDIO_CONFLICT_CANDIDATES=(linux-voice-assistant showtime akuapp voice-assistant aku-voice)
+# 探测结果（运行时填充）
+AUDIO_HOLDER_PIDS=()
+AUDIO_HOLDER_UNITS=()
+AUDIO_CONFLICT_FOUND=()
 
 # ---------------------------- 输出工具 ----------------------------
 if [ -t 1 ]; then
@@ -69,14 +80,35 @@ warn() { printf '%s[!]%s %s\n'  "$C_YEL" "$C_OFF" "$*" >&2; }
 die()  { printf '%s[✗]%s %s\n'  "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 hr()   { printf '%s\n' "------------------------------------------------------------------------"; }
 
+ask() {  # ask "提示语" -> 回显用户输入（非交互时返回空串）
+  local prompt="$1" ans=""
+  if [ "$INTERACTIVE" -eq 1 ]; then
+    read -r -p "  ${prompt}" ans || true
+  fi
+  printf '%s' "$ans"
+}
+
+yes_no() {  # yes_no "提示语"；返回 0 = 是
+  local prompt="$1" ans=""
+  [ "$INTERACTIVE" -eq 1 ] || return 1
+  read -r -p "  ${prompt} [y/N] " ans || true
+  case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
 usage() {
   cat <<EOF
 AkuBox Sendspin Client 安装脚本
 
 用法: sudo bash install.sh [选项]
 
+交互行为（默认）:
+  · 可修改设备显示名（直接回车保持当前主机名）
+  · 检测并列出当前占用声卡的进程，以及系统上真实存在、可能争用声卡的服务
+  · 询问是否停止并禁用这些服务
+  加 -y 或让标准输入不是终端（如 curl | bash）即转为全自动，不做任何交互。
+
 选项:
-  --name <名称>          设备显示名（默认: 当前主机名）  当前: ${DEVICE_NAME}
+  --name <名称>          设备显示名（跳过交互改名）  当前: ${DEVICE_NAME}
   --audio-device <设备>  ALSA 播放设备（默认自动探测 plughw:N,0）
   --mixer <card:控件>    ALSA 硬件混音器（默认自动探测，如 0:Power Amplifier）
   --dir <路径>           源码目录（默认: ${INSTALL_DIR}）
@@ -84,20 +116,28 @@ AkuBox Sendspin Client 安装脚本
   --patch-dir <路径>     指定补丁目录（默认: 脚本同级 patches/，否则自动下载）
   --build-only           只克隆+打补丁+编译，不安装、不写 systemd
   --skip-legacy-ma-patch 不应用 MA 2.10.x 兼容补丁（仅当 MA >= 2.11 / aiosendspin 10.x）
-  --free-audio           安装前停止并禁用会抢占声卡的厂商服务（VAS / showtime）
-  -y, --yes              不交互确认
+  --free-audio           停止并禁用探测到的声卡争用服务（非交互时仍需 -y 才不再询问）
+  --free-audio-services <列表>
+                         指定要停止并禁用的服务（空格分隔），不再探测、不再询问。
+                         例如只释放语音助手而保留 showtime:
+                         --free-audio-services "linux-voice-assistant"
+  -y, --yes              全自动：不改名、不询问、按参数执行
   -h, --help             显示本帮助
 
+探测的候选服务: ${AUDIO_CONFLICT_CANDIDATES[*]}
+（仅当系统上确实存在该服务时才会出现在列表中）
+
 示例:
-  sudo bash install.sh --name "卧室 AkuBox"
-  sudo bash install.sh --free-audio -y
+  sudo bash install.sh                          # 交互式
+  sudo bash install.sh --name "卧室 AkuBox"      # 只改名，其余交互
+  sudo bash install.sh --name "卧室 AkuBox" -y   # 全自动
 EOF
 }
 
 # ---------------------------- 参数解析 ----------------------------
 while [ $# -gt 0 ]; do
   case "$1" in
-    --name)                DEVICE_NAME="${2:?--name 需要参数}"; shift 2 ;;
+    --name)                DEVICE_NAME="${2:?--name 需要参数}"; NAME_GIVEN=1; shift 2 ;;
     --audio-device)        AUDIO_DEVICE="${2:?--audio-device 需要参数}"; shift 2 ;;
     --mixer)               ALSA_MIXER="${2:?--mixer 需要参数}"; shift 2 ;;
     --dir)                 INSTALL_DIR="${2:?--dir 需要参数}"; shift 2 ;;
@@ -106,11 +146,25 @@ while [ $# -gt 0 ]; do
     --build-only)          BUILD_ONLY=1; shift ;;
     --skip-legacy-ma-patch) SKIP_LEGACY_PATCH=1; shift ;;
     --free-audio)          FREE_AUDIO=1; shift ;;
+    --free-audio-services)
+                           [ $# -ge 2 ] || die "--free-audio-services 需要参数"
+                           FREE_AUDIO=1
+                           FREE_AUDIO_EXPLICIT=1
+                           read -r -a AUDIO_CONFLICT_CANDIDATES <<< "$2"
+                           [ "${#AUDIO_CONFLICT_CANDIDATES[@]}" -gt 0 ] || die "--free-audio-services 列表为空"
+                           shift 2 ;;
     -y|--yes)              ASSUME_YES=1; shift ;;
     -h|--help)             usage; exit 0 ;;
     *) die "未知参数: $1（用 --help 查看用法）" ;;
   esac
 done
+
+# 交互能力：显式 -y 关闭；标准输入不是终端也关闭
+# （curl | bash 时 stdin 就是脚本本身，绝不能去读它）
+INTERACTIVE=1
+if [ "$ASSUME_YES" -eq 1 ] || [ ! -t 0 ]; then
+  INTERACTIVE=0
+fi
 
 # ---------------------------- 前置检查 ----------------------------
 preflight() {
@@ -148,8 +202,9 @@ preflight() {
   local parent="$INSTALL_DIR"
   while [ ! -d "$parent" ] && [ "$parent" != "/" ]; do parent="$(dirname "$parent")"; done
   local avail_kb
-  avail_kb="$(df -Pk "$parent" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
-  if [ -n "$avail_kb" ] && [ "$avail_kb" -lt 512000 ]; then
+  avail_kb="$(df -Pk "$parent" 2>/dev/null | awk 'NR==2{print $4}')"
+  avail_kb="${avail_kb:-0}"
+  if [ "$avail_kb" -lt 512000 ]; then
     die "磁盘空间不足：$parent 仅剩 $((avail_kb/1024)) MB，建议至少 800 MB"
   fi
   ok "磁盘空间充足（$parent 剩余 $((avail_kb/1024)) MB）"
@@ -157,10 +212,11 @@ preflight() {
 
 # ---------------------------- 依赖安装 ----------------------------
 install_deps() {
-  hr; log "安装编译依赖"
+  hr; log "安装依赖"
   export DEBIAN_FRONTEND=noninteractive
+  # alsa-utils(aplay/amixer) 与 psmisc(fuser) 用于声卡探测，必须显式依赖
   local pkgs=(git cmake pkg-config build-essential libasound2-dev
-              libavahi-compat-libdnssd-dev avahi-daemon)
+              libavahi-compat-libdnssd-dev avahi-daemon alsa-utils psmisc)
   local missing=()
   local p
   for p in "${pkgs[@]}"; do
@@ -174,6 +230,25 @@ install_deps() {
   apt-get update -qq || warn "apt-get update 失败，继续尝试安装"
   apt-get install -y --no-install-recommends "${missing[@]}" || die "依赖安装失败"
   ok "依赖安装完成"
+}
+
+# ---------------------------- 交互：设备名 ----------------------------
+interactive_name_step() {
+  if [ "$INTERACTIVE" -ne 1 ] || [ "$NAME_GIVEN" -eq 1 ]; then
+    log "设备显示名: ${DEVICE_NAME}"
+    return 0
+  fi
+  hr; log "设备名称"
+  printf '    当前: %s\n' "$DEVICE_NAME"
+  printf '    这个名字会显示在 Music Assistant 与 Home Assistant 中；\n'
+  printf '    多台 AkuBox 请使用不同名称以便区分。\n'
+  local ans; ans="$(ask "输入新名称，直接回车保持不变: ")"
+  if [ -n "$ans" ]; then
+    DEVICE_NAME="$ans"
+    ok "设备显示名已设为: ${DEVICE_NAME}"
+  else
+    ok "保持: ${DEVICE_NAME}"
+  fi
 }
 
 # ---------------------------- 声卡探测 ----------------------------
@@ -219,38 +294,123 @@ resolve_audio() {
     ok "硬件混音器: ${ALSA_MIXER}（手动指定）"
   fi
 
-  if aplay -l 2>/dev/null | grep -q '^card'; then
+  local cards; cards="$(aplay -l 2>/dev/null || true)"
+  if printf '%s' "$cards" | grep -q '^card'; then
     ok "声卡列表:"
-    aplay -l 2>/dev/null | sed -n 's/^\(card [0-9]*:.*\)/    \1/p'
+    printf '%s\n' "$cards" | sed -n 's/^\(card [0-9]*:.*\)/    \1/p'
   fi
 }
 
-show_audio_holders() {
+# ---------------------------- 声卡占用检测与释放 ----------------------------
+# 由 PID 反查所属 systemd 单元（取 cgroup 里最后一个 .service）
+pid_to_unit() {
+  local pid="$1" unit=""
+  if [ -r "/proc/${pid}/cgroup" ]; then
+    unit="$(sed -n 's#.*/\([^/]*\.service\)$#\1#p' "/proc/${pid}/cgroup" | tail -1)"
+  fi
+  printf '%s' "$unit"
+}
+
+# 填充 AUDIO_HOLDER_PIDS / AUDIO_HOLDER_UNITS
+detect_audio_holders() {
+  AUDIO_HOLDER_PIDS=()
+  AUDIO_HOLDER_UNITS=()
   [ -d /dev/snd ] || return 0
   command -v fuser >/dev/null 2>&1 || return 0
-  local holders=""
-  holders="$(fuser -v /dev/snd/* 2>&1 | awk '/F\.\.\.\./ {print $NF}' | sort -u || true)"
-  if [ -n "$holders" ]; then
-    warn "当前占用声卡的进程: $(echo "$holders" | tr '\n' ' ')"
-  fi
+  local pid unit
+  # fuser -v 输出列: USER PID ACCESS COMMAND，只取真正持有句柄的 F.... 行
+  while read -r pid _comm; do
+    [ -n "$pid" ] || continue
+    AUDIO_HOLDER_PIDS+=("$pid")
+    AUDIO_HOLDER_UNITS+=("$(pid_to_unit "$pid")")
+  done < <(fuser -v /dev/snd/* 2>&1 | awk '/F\.\.\.\./ {print $(NF-1), $NF}' | sort -u)
 }
 
-# ---------------------------- 释放声卡 ----------------------------
-free_audio() {
+# 填充 AUDIO_CONFLICT_FOUND：候选名单里「系统上确实存在」的服务
+detect_conflict_services() {
+  AUDIO_CONFLICT_FOUND=()
   local svc
-  for svc in "${AUDIO_CONFLICTS[@]}"; do
-    if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
-      if [ "$FREE_AUDIO" -eq 1 ]; then
-        log "停止并禁用 ${svc}.service"
-        systemctl stop "$svc" >/dev/null 2>&1 || true
-        systemctl disable "$svc" >/dev/null 2>&1 || true
-      else
-        if systemctl is-active --quiet "$svc" 2>/dev/null; then
-          warn "${svc}.service 正在运行，会抢占声卡。加 --free-audio 可自动停止并禁用它"
-        fi
-      fi
+  for svc in "${AUDIO_CONFLICT_CANDIDATES[@]}"; do
+    [ "$svc" = "$SERVICE_NAME" ] && continue          # 绝不把本播放器自己列进去
+    # 用 systemctl cat 判断单元是否存在：不经过管道，避免 SIGPIPE 误判
+    if systemctl cat "${svc}.service" >/dev/null 2>&1; then
+      AUDIO_CONFLICT_FOUND+=("$svc")
     fi
   done
+}
+
+audio_conflicts_step() {
+  hr; log "声卡占用检查"
+  detect_audio_holders
+  detect_conflict_services
+
+  # ---- 1) 当前持有哪些进程 ----
+  local i pid unit name note
+  if [ "${#AUDIO_HOLDER_PIDS[@]}" -gt 0 ]; then
+    log "当前占用声卡的进程:"
+    for i in "${!AUDIO_HOLDER_PIDS[@]}"; do
+      pid="${AUDIO_HOLDER_PIDS[$i]}"
+      unit="${AUDIO_HOLDER_UNITS[$i]}"
+      name="$(ps -o comm= -p "$pid" 2>/dev/null || echo '?')"
+      if [ "$unit" = "${SERVICE_NAME}.service" ]; then
+        note="  ← 本播放器自身（正常）"
+      elif [ -n "$unit" ]; then
+        note="  (${unit})"
+      else
+        note="  ← 非 systemd 服务，未纳入自动处理"
+      fi
+      printf '    PID %-7s %-24s%s\n' "$pid" "$name" "$note"
+    done
+  else
+    ok "当前没有进程占用声卡"
+  fi
+
+  # ---- 2) 系统上存在哪些争用服务 ----
+  if [ "${#AUDIO_CONFLICT_FOUND[@]}" -eq 0 ]; then
+    ok "系统上未发现会争用声卡的厂商服务（候选: ${AUDIO_CONFLICT_CANDIDATES[*]}）"
+    return 0
+  fi
+  log "系统上存在以下可能争用声卡的服务:"
+  local svc en ac
+  for svc in "${AUDIO_CONFLICT_FOUND[@]}"; do
+    en="$(systemctl is-enabled "$svc" 2>/dev/null || echo unknown)"
+    ac="$(systemctl is-active  "$svc" 2>/dev/null || echo unknown)"
+    printf '    %-34s %s / %s\n' "${svc}.service" "$en" "$ac"
+  done
+
+  # ---- 3) 决定处理哪些 ----
+  local targets=()
+  if [ "$FREE_AUDIO_EXPLICIT" -eq 1 ]; then
+    targets=("${AUDIO_CONFLICT_FOUND[@]}")                 # --free-audio-services 明确指定，不再询问
+  elif [ "$FREE_AUDIO" -eq 1 ]; then
+    if [ "$INTERACTIVE" -eq 1 ] && ! yes_no "停止并禁用以上服务以释放声卡?"; then
+      warn "已跳过释放声卡"
+      return 0
+    fi
+    targets=("${AUDIO_CONFLICT_FOUND[@]}")
+  elif [ "$INTERACTIVE" -eq 1 ]; then
+    if yes_no "是否停止并禁用以上服务以释放声卡?"; then
+      targets=("${AUDIO_CONFLICT_FOUND[@]}")
+    else
+      log "保持现状，未释放声卡"
+      return 0
+    fi
+  else
+    warn "非交互模式未释放声卡；若声卡被上述服务占用，播放器不会出声。"
+    warn "如需自动处理请加 --free-audio -y"
+    return 0
+  fi
+
+  if [ "${#targets[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  for svc in "${targets[@]}"; do
+    log "  停止并禁用 ${svc}.service"
+    systemctl stop "$svc" >/dev/null 2>&1 || true
+    systemctl disable "$svc" >/dev/null 2>&1 || true
+  done
+  ok "已释放声卡（如需恢复: systemctl enable --now <服务名>）"
 }
 
 # ---------------------------- 源码获取 ----------------------------
@@ -320,7 +480,10 @@ fetch_sources() {
 
 # ---------------------------- 补丁获取与应用 ----------------------------
 ensure_patches() {
-  [ -n "$PATCH_DIR" ] && { [ -d "$PATCH_DIR" ] || die "补丁目录不存在: ${PATCH_DIR}"; return 0; }
+  if [ -n "$PATCH_DIR" ]; then
+    [ -d "$PATCH_DIR" ] || die "补丁目录不存在: ${PATCH_DIR}"
+    return 0
+  fi
 
   local self_dir=""
   if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
@@ -336,9 +499,9 @@ ensure_patches() {
   log "本地无补丁目录，尝试下载 ..."
   local tmp; tmp="$(mktemp -d)"
   mkdir -p "${tmp}/patches"
-  local f base url
+  local f url got
   for f in 0001-sendspin-cpp-legacy-ma-compat.patch 0002-sendspin-client-pcm-first.patch; do
-    local got=0
+    got=0
     for url in "${RAW_MIRRORS[@]}"; do
       if curl -fsSL --connect-timeout 15 -o "${tmp}/patches/${f}" "${url}/patches/${f}" 2>/dev/null \
          && [ -s "${tmp}/patches/${f}" ] && grep -q '^diff --git' "${tmp}/patches/${f}"; then
@@ -397,8 +560,9 @@ build_client() {
 
   # 产物体检
   file "${build_dir}/sendspin-client" | sed 's/^/    /'
-  if ldd "${build_dir}/sendspin-client" 2>/dev/null | grep -q 'not found'; then
-    ldd "${build_dir}/sendspin-client" | grep 'not found' | sed 's/^/    /'
+  local ldd_out; ldd_out="$(ldd "${build_dir}/sendspin-client" 2>/dev/null || true)"
+  if printf '%s' "$ldd_out" | grep -q 'not found'; then
+    printf '%s\n' "$ldd_out" | grep 'not found' | sed 's/^/    /'
     die "二进制存在缺失的动态库"
   fi
   ok "动态库依赖完整"
@@ -485,9 +649,12 @@ summary() {
   hr; log "部署完成，自检"
   systemctl is-enabled "$SERVICE_NAME" 2>/dev/null | sed 's/^/    开机自启: /'
   systemctl is-active  "$SERVICE_NAME" 2>/dev/null | sed 's/^/    运行状态: /'
-  { ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null; } | grep -q ':8928' \
-    && ok "监听 0.0.0.0:8928（MA 将由此连入）" \
-    || warn "未检测到 8928 监听"
+  local listen_out; listen_out="$({ ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null; } || true)"
+  if printf '%s' "$listen_out" | grep -q ':8928'; then
+    ok "监听 0.0.0.0:8928（MA 将由此连入）"
+  else
+    warn "未检测到 8928 监听"
+  fi
   hr
   cat <<EOF
 下一步：
@@ -510,13 +677,12 @@ main() {
   printf '%s\n' "======================================================================"
   printf '%s\n' "  AkuBox Sendspin Client 安装脚本"
   printf '%s\n' "======================================================================"
-  log "设备名称: ${DEVICE_NAME}"
 
   preflight
+  interactive_name_step
   install_deps
   resolve_audio
-  show_audio_holders
-  free_audio
+  audio_conflicts_step
   fetch_sources
   apply_patches
   build_client

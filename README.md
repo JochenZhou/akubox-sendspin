@@ -27,19 +27,57 @@ git clone https://github.com/JochenZhou/akubox-sendspin.git /tmp/akubox-sendspin
 sudo bash /tmp/akubox-sendspin/install.sh
 ```
 
-指定设备名（建议，避免两台 AkuBox 重名）：
+### 交互式向导
 
-```bash
-sudo bash /tmp/akubox-sendspin/install.sh --name "卧室 AkuBox"
+不带参数直接运行时，脚本会引导你完成这几步：
+
+```
+[*] 环境检查
+    架构 armv7l 受支持 / 系统 Ubuntu 22.04.5 LTS / 磁盘空间充足
+
+[*] 设备名称
+    当前: akubox
+    这个名字会显示在 Music Assistant 与 Home Assistant 中；
+    多台 AkuBox 请使用不同名称以便区分。
+  输入新名称，直接回车保持不变: 客厅 AkuBox
+[✓] 设备显示名已设为: 客厅 AkuBox
+
+[*] 声卡占用检查
+[*] 当前占用声卡的进程:
+    PID 6965    sendspin-client         ← 本播放器自身（正常）
+[*] 系统上存在以下可能争用声卡的服务:
+    linux-voice-assistant.service      disabled
+    showtime.service                   enabled / active
+    akuapp.service                     disabled
+  是否停止并禁用以上服务以释放声卡? [y/N]
 ```
 
-让脚本自动腾出声卡（停止并禁用 `linux-voice-assistant` / `showtime`）：
+**服务清单是动态探测的**：脚本只在系统上**确实存在**该单元时才列出它。"不是每台 AkuBox 都装了
+`linux-voice-assistant`" —— 没装就完全不会出现，也不会因为脚本写死了名字而误报或误操作。
+
+同时会列出**当前真正持有 `/dev/snd` 的进程**，并标注它归属哪个 systemd 单元；不是 systemd 服务
+的进程会明确标记「未纳入自动处理」，不会被脚本乱动。本播放器自己占着声卡时会标为「正常」，
+不会被当成冲突项。
+
+### 全自动安装
 
 ```bash
-sudo bash /tmp/akubox-sendspin/install.sh --name "卧室 AkuBox" --free-audio -y
+sudo bash /tmp/akubox-sendspin/install.sh --name "卧室 AkuBox" -y
 ```
 
-脚本会：安装编译依赖 → 克隆并锁定上游提交 → 应用补丁 → 编译（单核约 30-40 分钟）→ 安装二进制 / 创建 `sendspin` 用户 / 写配置与 systemd → 启动并自检。
+`-y` = 不改名、不询问、按参数执行。**`-y` 本身不会去动任何服务**；要释放声卡必须显式加
+`--free-audio`。标准输入不是终端时（例如 `curl | bash`）也会自动转为全自动模式。
+
+### 精确指定要释放的服务
+
+```bash
+# 只释放语音助手，保留 showtime
+sudo bash /tmp/akubox-sendspin/install.sh --free-audio-services "linux-voice-assistant"
+```
+
+脚本会：环境检查 → 设备名 → 安装依赖 → 探测声卡 → **声卡占用检查与交互确认** → 克隆并锁定
+上游提交 → 应用补丁 → 编译（单核约 30-40 分钟）→ 安装二进制 / 创建 `sendspin` 用户 /
+写配置与 systemd → 启动并自检。
 
 安装完成后，在 Music Assistant 里进入 **设置 → 提供商 → Sendspin**，即可发现该设备；HA 中会出现对应的 `media_player` 实体。
 
