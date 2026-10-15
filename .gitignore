@@ -1,0 +1,21 @@
+# 编译产物与临时文件
+build/
+*.o
+*.a
+*.so
+
+# 测试音频 / 临时 HTTP 目录（部署过程产生的临时物，不入库）
+wwwroot/
+testtone.wav
+music.mp3
+
+# 设备本地密钥与状态，绝不能入库
+*.key
+*.psk
+*credentials*
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store

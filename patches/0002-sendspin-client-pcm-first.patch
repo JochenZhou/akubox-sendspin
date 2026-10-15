@@ -1,0 +1,39 @@
+diff --git a/src/main.cpp b/src/main.cpp
+index ef77200..e6ff3c1 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -613,12 +613,15 @@ int main(int argc, char* argv[]) {
+             if (supported) {
+                 fprintf(stderr, "  Device supports: %uHz 2ch %ubit\n", sample_rate, bit_depth);
+ 
++                // COMPAT PATCH (akubox): prefer PCM. The server honours this advertised order, and this build
++                // rejects every FLAC frame from the server (FLAC__ERROR_FRAME_NUMBER), so listing
++                // FLAC first left the player silent. PCM is listed first; the compressed codecs
++                // remain advertised below as fallbacks.
++                player_config.audio_formats.push_back({SendspinCodecFormat::PCM, 2, sample_rate, bit_depth});
++
+                 // Add FLAC format if supported
+                 player_config.audio_formats.push_back({SendspinCodecFormat::FLAC, 2, sample_rate, bit_depth});
+ 
+-                // Add PCM format if supported
+-                player_config.audio_formats.push_back({SendspinCodecFormat::PCM, 2, sample_rate, bit_depth});
+-
+                 // Add OPUS format for common sample rates (OPUS typically uses 48kHz)
+                 if (sample_rate == 48000) {
+                     player_config.audio_formats.push_back({SendspinCodecFormat::OPUS, 2, sample_rate, 16});
+@@ -630,12 +633,13 @@ int main(int argc, char* argv[]) {
+     if (player_config.audio_formats.empty()) {
+         fprintf(stderr, "Warning: No supported formats found for device '%s', using defaults\n",
+                 device_to_check.empty() ? "default" : device_to_check.c_str());
++        // COMPAT PATCH (akubox): same PCM-first ordering as the probed path above.
+         player_config.audio_formats = {
++            {SendspinCodecFormat::PCM, 2, 44100, 16},
++            {SendspinCodecFormat::PCM, 2, 48000, 16},
+             {SendspinCodecFormat::FLAC, 2, 44100, 16},
+             {SendspinCodecFormat::FLAC, 2, 48000, 16},
+             {SendspinCodecFormat::OPUS, 2, 48000, 16},
+-            {SendspinCodecFormat::PCM, 2, 44100, 16},
+-            {SendspinCodecFormat::PCM, 2, 48000, 16},
+         };
+     }
+     auto& player = client.add_player(std::move(player_config));

@@ -1,0 +1,24 @@
+# 参考用 systemd 单元。
+# install.sh 会按你的设备名重新生成同名文件到 /etc/systemd/system/sendspin-client.service，
+# 这里保留一份便于查看与手动部署。
+#
+# 手动部署时请把 ExecStart 里的显示名换成你自己的：
+#   ExecStart=/usr/bin/sendspin-client "客厅 AkuBox"
+
+[Unit]
+Description=SendSpin Client Service (akubox)
+After=network-online.target sound.target avahi-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sendspin
+ExecStart=/usr/bin/sendspin-client "客厅 AkuBox"
+Restart=on-failure
+RestartSec=5s
+StateDirectory=sendspin-client
+StateDirectoryMode=0700
+Nice=-10
+
+[Install]
+WantedBy=multi-user.target

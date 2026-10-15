@@ -1,0 +1,119 @@
+diff --git a/src/noise_handshake.cpp b/src/noise_handshake.cpp
+index b5230f8..3877e48 100644
+--- a/src/noise_handshake.cpp
++++ b/src/noise_handshake.cpp
+@@ -174,20 +174,39 @@ std::optional<Msg1CoreResult> run_msg1_core(HandshakeKind kind, const Identity&
+         return std::nullopt;
+     }
+ 
+-    // messaging.md "noise/handshake": the payload declares which category the server is using the
+-    // referenced PSK as. A missing or unknown code is a malformed payload, which connection.md
+-    // "Failure Handling" makes a silent failure.
+-    auto psk_category = psk_category_from_string(psk_category_code);
+-    if (!psk_category.has_value()) {
+-        SS_LOGE(TAG, "%s: msg1 payload psk_category missing or unknown ('%s')", log_prefix,
+-                psk_category_code.c_str());
+-        return std::nullopt;
++    // COMPAT PATCH (akubox): aiosendspin 9.x (Music Assistant 2.10.x) omits psk_category in
++    // Noise msg1; 10.x sends it. When absent, resolve the psk_id across all categories in order.
++    std::optional<PskCategory> psk_category;
++    if (psk_category_code.empty()) {
++        SS_LOGW(TAG, "%s: msg1 payload has no psk_category (legacy server); trying all", log_prefix);
++    } else {
++        psk_category = psk_category_from_string(psk_category_code);
++        if (!psk_category.has_value()) {
++            SS_LOGE(TAG, "%s: msg1 payload psk_category unknown ('%s')", log_prefix,
++                    psk_category_code.c_str());
++            return std::nullopt;
++        }
+     }
+ 
+     SS_LOGD(TAG, "%s: psk_id='%s' psk_category='%s'", log_prefix, psk_id.c_str(),
+             psk_category_code.c_str());
+ 
+-    auto resolved = record_store.resolve_by_psk_id(psk_id, psk_category.value());
++    std::optional<ResolvedPsk> resolved;
++    if (psk_category.has_value()) {
++        resolved = record_store.resolve_by_psk_id(psk_id, *psk_category);
++    } else {
++        for (auto cat : {PskCategory::LONG_TERM, PskCategory::PAIRING, PskCategory::SENTINEL}) {
++            resolved = record_store.resolve_by_psk_id(psk_id, cat);
++            if (resolved.has_value()) {
++                psk_category = cat;
++                psk_category_code = (cat == PskCategory::LONG_TERM ? "lt" :
++                                     cat == PskCategory::PAIRING ? "pr" : "sn");
++                SS_LOGI(TAG, "%s: resolved psk under category '%s'", log_prefix,
++                        psk_category_code.c_str());
++                break;
++            }
++        }
++    }
+     if (resolved.has_value()) {
+         // Post-match check (connection.md "Pre-Shared Key"): every long-term PSK is persisted
+         // with the server_id it was minted for. The Pairing and Sentinel PSKs are bound to no
+diff --git a/src/protocol.cpp b/src/protocol.cpp
+index b436621..5813a67 100644
+--- a/src/protocol.cpp
++++ b/src/protocol.cpp
+@@ -865,14 +865,14 @@ std::string format_client_hello_message(const ClientHelloMessage* msg,
+             root["payload"]["device_info"]["mac_address"] = info.mac_address.value();
+         }
+     }
+-    // pairing.md "client/hello pair-method descriptor": supported_pair_methods is an object keyed
+-    // by pairing method identifier, each value the method's descriptor. It is REQUIRED (every
+-    // client implements at least pairing_psk, messaging.md "client/hello"), so the object is
+-    // emitted even for an empty list.
++    // COMPAT PATCH (akubox): aiosendspin 9.x (Music Assistant 2.10.x) expects
++    // supported_pair_methods as a LIST of descriptors, each carrying a "method" field;
++    // 10.x accepts the object form (spec-pr-158). Emit the list form.
+     {
+-        JsonObject methods_obj = root["payload"]["supported_pair_methods"].to<JsonObject>();
++        JsonArray methods_arr = root["payload"]["supported_pair_methods"].to<JsonArray>();
+         for (const auto& desc : msg->supported_pair_methods) {
+-            JsonObject method_obj = methods_obj[to_cstr(desc.method)].to<JsonObject>();
++            JsonObject method_obj = methods_arr.add<JsonObject>();
++            method_obj["method"] = to_cstr(desc.method);
+             const auto& out_channels = desc.out_channels;
+             if (out_channels.has_value() && !out_channels->empty()) {
+                 JsonArray ch_arr = method_obj["out_channels"].to<JsonArray>();
+@@ -914,6 +914,16 @@ std::string format_client_hello_message(const ClientHelloMessage* msg,
+         }
+         root["payload"]["player@v1_support"]["buffer_capacity"] =
+             msg->player_v1_support.value().buffer_capacity;
++
++        // COMPAT PATCH (akubox): aiosendspin 9.1.1 still declares supported_commands a required key
++        // of the player@v1 support object; 10.x dropped it. Emit the hello-level subset the legacy
++        // schema validates ('volume'/'mute') so the 9.x parser accepts this payload.
++        {
++            JsonArray hello_commands =
++                root["payload"]["player@v1_support"]["supported_commands"].to<JsonArray>();
++            hello_commands.add(to_cstr(SendspinPlayerCommand::VOLUME));
++            hello_commands.add(to_cstr(SendspinPlayerCommand::MUTE));
++        }
+     }
+ 
+     if (msg->visualizer_support.has_value()) {
+@@ -952,14 +962,20 @@ std::string format_client_state_message(const ClientStateMessage* msg,
+         root["payload"]["player"]["volume"] = player_state.volume;
+         root["payload"]["player"]["muted"] = player_state.muted;
+         root["payload"]["player"]["output_delay_ms"] = player_state.output_delay_ms;
++        // COMPAT PATCH (akubox): aiosendspin 9.1.1 names this field static_delay_ms and rejects the
++        // whole payload when only the 10.x spelling is present, so both are written.
++        root["payload"]["player"]["static_delay_ms"] = player_state.output_delay_ms;
+         root["payload"]["player"]["required_lead_time_ms"] = player_state.required_lead_time_ms;
+         root["payload"]["player"]["min_buffer_ms"] = player_state.min_buffer_ms;
+         // roles/player/v1.md "client/state player object": supported_commands is a required key
+         // that is empty when the player accepts no commands, so the array is emitted even then.
+         JsonArray commands_list = root["payload"]["player"]["supported_commands"].to<JsonArray>();
+-        for (const auto& cmd : player_state.supported_commands) {
+-            commands_list.add(to_cstr(cmd));
+-        }
++        // COMPAT PATCH (akubox): state-level supported_commands for legacy (aiosendspin 9.x) servers.
++        // 9.x validates this list against {'set_static_delay'} only and rejects the whole
++        // client/state payload otherwise; 'volume'/'mute' are hello-level there (patch 3) and the
++        // volume/muted values reported just above are still honoured. Only the delay command is
++        // declared at state level, so both 9.x and 10.x servers accept the message.
++        commands_list.add("set_static_delay");
+     }
+ 
+     if (msg->artwork.has_value()) {

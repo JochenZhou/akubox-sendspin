@@ -1,0 +1,46 @@
+# AkuBox Sendspin Client 配置样例
+#
+# 实际路径: /etc/sendspin-client/sendspin-client.conf
+# install.sh 会自动探测并填写 AUDIO_DEVICE / ALSA_MIXER_SPEC。
+# 修改后执行: systemctl restart sendspin-client
+
+# 设备在 Music Assistant 中显示的名称
+# 多台设备请使用不同名称，便于区分
+FRIENDLY_NAME="客厅 AkuBox"
+
+# ALSA 播放设备。用 `aplay -l` 查看可用声卡
+# AkuBox (sun4i-codec) 为 plughw:0,0
+AUDIO_DEVICE="plughw:0,0"
+
+# ALSA 硬件混音器，格式 "声卡号:控件名"。
+# 用 `amixer -c 0 scontrols` 查看控件名。
+# AkuBox 为 0:Power Amplifier（范围 0-63）。
+# 留空则不使用硬件音量控制（此时音量由服务端软件调整）。
+ALSA_MIXER_SPEC="0:Power Amplifier"
+
+# 日志级别: none | error | warn | info | debug | verbose
+LOG_LEVEL="info"
+
+# 空闲释放声卡的秒数，0 = 不释放（推荐，避免与其它服务争抢）
+IDLE_TIMEOUT=0
+
+# 连接存活超时（秒）
+LIVENESS_TIMEOUT=60
+
+# 连接断开后自动重连
+RECONNECT_ON_LOSS=true
+
+# 允许未配对的 server 播放（MA 2.10.x 走这条路径，必须 true）
+UNPAIRED_ACCESS=true
+
+# ---------------------------------------------------------------------------
+# 不要设置 CONNECT_URL。
+#
+# 本客户端以「监听模式」运行（默认端口 8928），并通过 mDNS 广播 _sendspin._tcp，
+# 由 Music Assistant 主动连入。
+#
+# 设置 CONNECT_URL 会变成「客户端出站连 MA 的 8927 端口」的反向流程，
+# 握手必然失败（Noise handshake / Malformed client/hello）。
+#
+# CONNECT_URL=""
+# ---------------------------------------------------------------------------
