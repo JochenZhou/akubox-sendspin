@@ -52,10 +52,25 @@ index b5230f8..3877e48 100644
          // Post-match check (connection.md "Pre-Shared Key"): every long-term PSK is persisted
          // with the server_id it was minted for. The Pairing and Sentinel PSKs are bound to no
 diff --git a/src/protocol.cpp b/src/protocol.cpp
-index b436621..5813a67 100644
+index b436621..59231da 100644
 --- a/src/protocol.cpp
 +++ b/src/protocol.cpp
-@@ -865,14 +865,14 @@ std::string format_client_hello_message(const ClientHelloMessage* msg,
+@@ -211,6 +211,14 @@ static bool process_server_player_command_object(const JsonObject player_object,
+         player_cmd->output_delay_ms = v;
+     }
+ 
++    // COMPAT PATCH (akubox): aiosendspin 9.x carries the delay under static_delay_ms, the name
++    // 10.x replaced with output_delay_ms. Read it when the current spelling is absent.
++    if (!player_cmd->output_delay_ms.has_value()) {
++        if (auto v = read_uint_field<uint16_t>(player_object["static_delay_ms"], "static_delay_ms")) {
++            player_cmd->output_delay_ms = v;
++        }
++    }
++
+     return true;
+ }
+ 
+@@ -865,14 +873,14 @@ std::string format_client_hello_message(const ClientHelloMessage* msg,
              root["payload"]["device_info"]["mac_address"] = info.mac_address.value();
          }
      }
@@ -76,7 +91,7 @@ index b436621..5813a67 100644
              const auto& out_channels = desc.out_channels;
              if (out_channels.has_value() && !out_channels->empty()) {
                  JsonArray ch_arr = method_obj["out_channels"].to<JsonArray>();
-@@ -914,6 +914,16 @@ std::string format_client_hello_message(const ClientHelloMessage* msg,
+@@ -914,6 +922,16 @@ std::string format_client_hello_message(const ClientHelloMessage* msg,
          }
          root["payload"]["player@v1_support"]["buffer_capacity"] =
              msg->player_v1_support.value().buffer_capacity;
@@ -93,7 +108,7 @@ index b436621..5813a67 100644
      }
  
      if (msg->visualizer_support.has_value()) {
-@@ -952,14 +962,20 @@ std::string format_client_state_message(const ClientStateMessage* msg,
+@@ -952,14 +970,20 @@ std::string format_client_state_message(const ClientStateMessage* msg,
          root["payload"]["player"]["volume"] = player_state.volume;
          root["payload"]["player"]["muted"] = player_state.muted;
          root["payload"]["player"]["output_delay_ms"] = player_state.output_delay_ms;
@@ -117,3 +132,20 @@ index b436621..5813a67 100644
      }
  
      if (msg->artwork.has_value()) {
+diff --git a/src/protocol_messages.h b/src/protocol_messages.h
+index 52f45bd..1e6ef71 100644
+--- a/src/protocol_messages.h
++++ b/src/protocol_messages.h
+@@ -481,6 +481,12 @@ inline std::optional<SendspinPlayerCommand> player_command_from_string(std::stri
+     if (str == "set_output_delay") {
+         return SendspinPlayerCommand::SET_OUTPUT_DELAY;
+     }
++    // COMPAT PATCH (akubox): aiosendspin 9.x (Music Assistant 2.10.x) names this command
++    // set_static_delay; 10.x renamed it to set_output_delay. Accept both spellings so the
++    // command the client advertises in client/state can actually be parsed back.
++    if (str == "set_static_delay") {
++        return SendspinPlayerCommand::SET_OUTPUT_DELAY;
++    }
+     return std::nullopt;
+ }
+ 

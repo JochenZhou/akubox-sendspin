@@ -374,7 +374,7 @@ apply_patches() {
   else
     apply_one_patch "${INSTALL_DIR}/sendspin-cpp" \
       "${PATCH_DIR}/0001-sendspin-cpp-legacy-ma-compat.patch" \
-      "sendspin-cpp: 5 处 MA 2.10.x 协议兼容（Noise/hello/state）"
+      "sendspin-cpp: 6 处 MA 2.10.x 协议兼容（Noise / hello / state / server 命令）"
   fi
   apply_one_patch "$INSTALL_DIR" \
     "${PATCH_DIR}/0002-sendspin-client-pcm-first.patch" \

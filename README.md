@@ -2,7 +2,7 @@
 
 让 AkuBox（ARMv7 智能音箱）作为 **Music Assistant 官方附加组件**的原生播放器，由 MA 主动发现并连入 —— **不需要改动或升级 MA 服务端**。
 
-本仓库包含在真机上验证通过的**源码编译流程**、**6 处协议兼容补丁**和**一键安装脚本**。
+本仓库包含在真机上验证通过的**源码编译流程**、**7 处协议兼容补丁**和**一键安装脚本**。
 
 ```
 ┌──────────────┐  mDNS _sendspin._tcp   ┌─────────────────────┐
@@ -14,7 +14,7 @@
 
 ## 为什么需要这个仓库
 
-上游 `TermeHansen/sendspin-client` 内嵌的 `sendspin-cpp` 是按 **aiosendspin 10.x** 的 wire shape 写的，而当前稳定版 Music Assistant **2.10.x 固定在 aiosendspin 9.1.1**。两者在 Noise 握手、`client/hello`、`client/state` 三个环节共 6 处不兼容，且 MA 每次只报最外层的 `InvalidFieldValue`，不指出具体字段 —— 逐个手工排查非常耗时。
+上游 `TermeHansen/sendspin-client` 内嵌的 `sendspin-cpp` 是按 **aiosendspin 10.x** 的 wire shape 写的，而当前稳定版 Music Assistant **2.10.x 固定在 aiosendspin 9.1.1**。两者在 Noise 握手、`client/hello`、`client/state`、`server/command` 四个环节共 7 处不兼容，且 MA 每次只报最外层的 `InvalidFieldValue`，不指出具体字段 —— 逐个手工排查非常耗时。
 
 另外上游预编译的 armhf Debian 包要求 `GLIBC_2.38` / `GLIBCXX_3.4.32`，而 AkuBox 是 Ubuntu 22.04（glibc 2.35），**必须源码编译**。本仓库的自编译产物只要求 `GLIBC_2.34`。
 
@@ -43,7 +43,7 @@ sudo bash /tmp/akubox-sendspin/install.sh --name "卧室 AkuBox" --free-audio -y
 
 安装完成后，在 Music Assistant 里进入 **设置 → 提供商 → Sendspin**，即可发现该设备；HA 中会出现对应的 `media_player` 实体。
 
-## 6 处协议兼容补丁
+## 7 处协议兼容补丁
 
 | # | 位置 | MA 2.10.x（aiosendspin 9.1.1）要的 | 上游 cpp 0.9.4 发的 | 处理 |
 |---|---|---|---|---|
@@ -52,9 +52,23 @@ sudo bash /tmp/akubox-sendspin/install.sh --name "卧室 AkuBox" --free-audio -y
 | 3 | `client/hello` → `player@v1_support.supported_commands` | **必填**，值限 `volume`/`mute` | 省略（10.x 才可选） | 补 `["volume","mute"]` |
 | 4 | `client/state` → `player` 延迟字段名 | `static_delay_ms` | `output_delay_ms`（后续版本改名） | **两个键都写**，旧服务端忽略多余键 |
 | 5 | `client/state` → `player.supported_commands` | **只允许 `set_static_delay`** | `["volume","mute"]` | 改为只发 `set_static_delay` |
-| 6 | 编码偏好顺序 | 取 `supported_formats` 列表中**第一个**匹配项 | FLAC 排在 PCM 前 | **PCM 提前**（见下） |
+| 6 | `server/command` → `player.command` | 命令名 `set_static_delay`，值在 `static_delay_ms` | 只认 `set_output_delay` / `output_delay_ms` | **两种拼写都接受**（见下） |
+| 7 | 编码偏好顺序 | 取 `supported_formats` 列表中**第一个**匹配项 | FLAC 排在 PCM 前 | **PCM 提前**（见下） |
 
-### 第 6 处是最隐蔽的坑
+### 第 6 处：自己宣告的能力，自己解析不了
+
+补丁 5 让客户端在 `client/state` 里宣告支持 `set_static_delay`（9.x 的校验只允许这个值）。MA 收到后**会真的把这条命令发回来**用于同步播放延迟 —— 但上游解析器只认 10.x 的 `set_output_delay`，于是每次连接都报一条：
+
+```
+W sendspin.protocol: Ignoring field 'command': unknown value 'set_static_delay'
+E sendspin.protocol: Invalid server player command
+```
+
+**症状很轻（播放与音量都正常），但它是真缺陷**：MA 永远无法同步该设备的输出延迟，多房间分组时对不齐。修法是把旧拼写映射到同一个命令、并补读 `static_delay_ms` 字段。
+
+> 教训：打「兼容旧服务端」的补丁时，要一并处理**旧服务端据此回发**的消息 —— 宣告一个能力就必须能解析对它的调用。
+
+### 第 7 处是最隐蔽的坑
 
 协议层全通、连接 `ESTABLISHED`、日志无任何连接错误，但**喇叭全程无声**：
 
@@ -91,7 +105,9 @@ I sendspin.sync_task: Processed new codec header: pcm, 44100 Hz, 2 ch, 16-bit
 | 系统 | Ubuntu 22.04.5 LTS |
 | 声卡 | `sun4icodec` → `plughw:0,0`，混音器 `0:Power Amplifier` |
 | 服务端 | Music Assistant **2.10.6**（官方附加组件，未修改） |
-| 实际播放验证 | 播完 372 秒整曲，零解码错误，混音器音量与 HA 对齐 |
+| 实际播放验证 | 播完 372 秒整曲，零解码错误 |
+| 音量控制验证 | HA `volume_set 0.6` → 硬件混音器 12→50（0-63）正确跟随 |
+| 日志洁净度 | 连接/播放期间无任何 protocol / decoder 报错 |
 
 ## 配置
 
@@ -173,8 +189,8 @@ nmcli con up <连接UUID>
 ├── install.sh                               # 一键安装脚本
 ├── uninstall.sh                             # 卸载脚本
 ├── patches/
-│   ├── 0001-sendspin-cpp-legacy-ma-compat.patch   # 补丁 1-5（Noise / hello / state）
-│   └── 0002-sendspin-client-pcm-first.patch       # 补丁 6（PCM 优先）
+│   ├── 0001-sendspin-cpp-legacy-ma-compat.patch   # 差异 1-6（Noise / hello / state / server 命令）
+│   └── 0002-sendspin-client-pcm-first.patch       # 差异 7（PCM 优先）
 ├── config/sendspin-client.conf.example      # 配置样例
 └── systemd/sendspin-client.service          # systemd 单元参考
 ```
