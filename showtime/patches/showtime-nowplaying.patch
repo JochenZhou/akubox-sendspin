@@ -1,5 +1,5 @@
---- a/showtime.c	2026-10-16 22:51:23.000000000 +0800
-+++ b/showtime.c	2026-10-16 22:51:23.000000000 +0800
+--- a/showtime.c	2026-10-16 23:11:50.000000000 +0800
++++ b/showtime.c	2026-10-16 23:11:50.000000000 +0800
 @@ -12,6 +12,9 @@
  //#include <gif_lib.h>
  #include FT_FREETYPE_H
@@ -10,7 +10,7 @@
  #define VOLUME_MIN 0
  #define VOLUME_MAX 63
  // 帧缓冲结构体
-@@ -669,6 +672,260 @@
+@@ -669,6 +672,263 @@
  
  // (Place get_text_width function here or elsewhere appropriate)
  
@@ -112,6 +112,9 @@
 +#define COVER_SIZE   120
 +#define TITLE_Y      (-11)
 +#define TITLE_SIZE   12
++// 时间数字字号：决定高度（字形高 ≈ 0.91×字号）。状态行以下是可见行 38..131（约 94 行），
++// 取 100 → 字形高约 91 行接近撑满；宽度交给下面的水平压缩，不再受宽度约束。
++#define TIME_FONT_SIZE 100
 +
 +// ==================== 专辑封面（步骤 2） ====================
 +#define COVER_CACHE_DIR "/tmp/showtime-cover-cache"
@@ -271,7 +274,7 @@
  // 显示时间和电池状态
  void show_time_and_battery(FrameBuffer *fb, FontRenderer *fr, Image *charging_icon, Image *battery_icon) {
      time_t now;
-@@ -713,42 +970,76 @@
+@@ -713,42 +973,92 @@
          snprintf(capacity_str_vol, sizeof(capacity_str_vol), "vol:%d%%", vol_capacity);
          
          fb_clear_back_buffer(fb, 0, 0, 0); // Clear screen
@@ -309,22 +312,36 @@
 -        int time_font_size_val = 46; // Original font size for time
 -        unsigned char time_color_r = 0, time_color_g = 253, time_color_b = 118; // Original time color
 -        int time_is_chinese = 0;  // Time (digits, colon) is not Chinese
-+        // COMPAT (akubox): 日期与星期已移除，时间字号取「能塞进屏宽的最大值」并水平居中。
-+        // 字号只依赖字体，与时:分无关，所以算一次缓存下来（用 00:00 作最宽情形）。
++        // COMPAT (akubox): 日期与星期已移除。时间改为「高度优先」排版：用大字号把数字撑高，
++        // 再用 FreeType 的水平变换矩阵把它压窄到屏宽内 —— 接受非等比方放，观感是瘦高的数字。
++        // （等比放大的上限就是原来那样：宽度先到顶，所以想更高只能压窄。）
 +        static int time_font_size_val = 0;
++        static int time_x_scale_pct = 100;
 +        if (time_font_size_val == 0) {
-+            int max_w = fb->width - 6;
-+            for (int s = 108; s >= 20; s--) {
-+                int w = get_text_width(fr, "00:00", s, 0);
-+                if (w > 0 && w <= max_w) { time_font_size_val = s; break; }
++            time_font_size_val = TIME_FONT_SIZE;
++            // 此刻变换还是单位矩阵，量到的是自然宽度
++            int natural = get_text_width(fr, "00:00", time_font_size_val, 0);
++            int avail = fb->width - 4;
++            if (natural > avail && natural > 0) {
++                time_x_scale_pct = (int)((long)avail * 100 / natural);
++                if (time_x_scale_pct < 15) time_x_scale_pct = 15;
 +            }
-+            if (time_font_size_val == 0) time_font_size_val = 46;
-+            fprintf(stderr, "时间字号: %d\n", time_font_size_val);
++            fprintf(stderr, "时间: 字号=%d 自然宽=%d 水平压缩=%d%%\n",
++                    time_font_size_val, natural, time_x_scale_pct);
 +        }
-+        // 竖直居中于顶部状态行以下：由实测关系 可见中心 ≈ 130 - y - 1.45*字号 反解 y
-+        int time_y_coord = 130 - (time_font_size_val * 145 / 100) - 84;
++        // 由实测关系 可见底 ≈ 131-(y+字号)-1 反解：底边落在可见行 130
++        int time_y_coord = -time_font_size_val;
 +        unsigned char time_color_r = 0, time_color_g = 253, time_color_b = 118;
 +        int time_is_chinese = 0;
++
++        // 挂上水平压缩矩阵。之后 get_text_width 与 draw_text 都会带上它：
++        // FreeType 会把变换同时作用到字形轮廓与 advance 上，所以测宽/定位/绘制三者一致。
++        FT_Matrix time_xform;
++        time_xform.xx = (FT_Fixed)(65536L * time_x_scale_pct / 100);
++        time_xform.xy = 0;
++        time_xform.yx = 0;
++        time_xform.yy = 65536L;
++        FT_Set_Transform(fr->face, &time_xform, NULL);
  
 -        // 1. Draw Hour "HH"
 -        draw_text(fb, fr, hour_str, time_base_x, time_y_coord, 
@@ -339,12 +356,12 @@
 +        int width_mm = get_text_width(fr, minute_str, time_font_size_val, time_is_chinese);
 +        int time_base_x = (fb->width - (width_hh + width_colon + width_mm)) / 2;
 +        if (time_base_x < 0) time_base_x = 0;
- 
--        // 4. Conditionally draw Colon ":"
++
 +        // 1. Draw Hour "HH"
 +        draw_text(fb, fr, hour_str, time_base_x, time_y_coord,
 +                  time_color_r, time_color_g, time_color_b, time_font_size_val, time_is_chinese);
-+
+ 
+-        // 4. Conditionally draw Colon ":"
 +        // 2. 冒号（闪烁时也不占位变化，MM 位置稳定）
 +        int current_draw_x = time_base_x + width_hh;
          if (show_colon_for_time) {
@@ -360,6 +377,8 @@
 +        // 3. Draw Minute "MM"
 +        draw_text(fb, fr, minute_str, current_draw_x, time_y_coord,
                    time_color_r, time_color_g, time_color_b, time_font_size_val, time_is_chinese);
++
++        FT_Set_Transform(fr->face, NULL, NULL);   // 复位，别影响电量/音量等后续绘制
          // --- End of Time Drawing Logic ---
  
 -        // 绘制日期 (original position)
@@ -370,8 +389,21 @@
          
          int battery_x = fb->width - 100;
          int battery_y = 30;
-@@ -769,6 +1060,8 @@
-             draw_image(fb, charging_icon, 70, battery_y + 65);
+@@ -766,9 +1076,20 @@
+         draw_text(fb, fr, capacity_str_vol, 0, battery_y + 65, r_batt, g_batt, b_batt, 11, 0); // Assuming same color for volume
+         
+         if (strcmp(battery_status, "Charging") == 0 && charging_icon) {
+-            draw_image(fb, charging_icon, 70, battery_y + 65);
++            // COMPAT (akubox): 原先画在 (70, battery_y+65) —— 但 draw_text 按基线排版（字形落在
++            // y 之上），draw_image 却从 y 往下铺，同一个 y 两者差半个字高，图标因此比文字低 6 行、
++            // 还往下多挂 12 行；水平上又孤零零悬在屏幕中间，离它所属的电量百分比 24px 远。
++            // 改为：紧贴电量百分比左侧，并与它竖直居中对齐。
++            int pct_x = battery_x + 60;                      // 电量百分比左缘（实测可见 x 123）
++            int icon_x = pct_x - charging_icon->width - 4;   // 右缘留 4px 间隙
++            if (icon_x < 0) icon_x = 0;
++            // 文字字形实测落在可见行 15..24（中心 19.5）；图标高 16，让中心也对到 19.5 →
++            // 图标可见行 12..27 → 代码 y = 131-27 = 104
++            draw_image(fb, charging_icon, icon_x, 104);
          }
          
 +        }  // end clock branch
@@ -379,7 +411,7 @@
          fb_update_screen(fb);
          
          sleep(1 - (now % 1)); // Approx 1 sec sleep
-@@ -777,6 +1070,7 @@
+@@ -777,6 +1098,7 @@
  
  // ... (main function and other functions remain the same) ...
  int main(int argc, char *argv[]) {
