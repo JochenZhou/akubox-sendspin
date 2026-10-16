@@ -1,0 +1,327 @@
+--- a/showtime.c	2026-10-16 22:36:37.000000000 +0800
++++ b/showtime.c	2026-10-16 22:36:37.000000000 +0800
+@@ -12,6 +12,9 @@
+ //#include <gif_lib.h>
+ #include FT_FREETYPE_H
+ #include <dirent.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <curl/curl.h>
+ #define VOLUME_MIN 0
+ #define VOLUME_MAX 63
+ // 帧缓冲结构体
+@@ -669,6 +672,263 @@
+ 
+ // (Place get_text_width function here or elsewhere appropriate)
+ 
++// ==================== 正在播放（now playing） ====================
++// 数据来自 sendspin-client 写出的 key=value 文件：每行一个 "key=value"，
++// 客户端已把值里的换行替换为空格，所以按首个 '=' 切分即可。
++#define NOWPLAYING_PATH      "/var/lib/sendspin-client/nowplaying"
++#define CLOCK_RESUME_DELAY_S 5
++
++typedef struct {
++    int  playing;
++    char title[256];
++    char artist[256];
++    char album[256];
++    char artwork_url[512];
++} NowPlaying;
++
++static void np_set(char *dst, size_t cap, const char *src) {
++    if (cap == 0) return;
++    snprintf(dst, cap, "%s", (src != NULL) ? src : "");
++}
++
++// 读取播放信息；返回 1 表示读到了文件（内容可能为空）
++static int read_nowplaying(NowPlaying *np) {
++    FILE *f = fopen(NOWPLAYING_PATH, "r");
++    if (f == NULL) return 0;
++    memset(np, 0, sizeof(*np));
++    char line[1024];
++    while (fgets(line, sizeof(line), f) != NULL) {
++        size_t n = strlen(line);
++        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
++        char *eq = strchr(line, '=');
++        if (eq == NULL) continue;
++        *eq = '\0';
++        const char *key = line;
++        const char *val = eq + 1;
++        if (strcmp(key, "state") == 0) {
++            np->playing = (strcmp(val, "playing") == 0);
++        } else if (strcmp(key, "title") == 0) {
++            np_set(np->title, sizeof(np->title), val);
++        } else if (strcmp(key, "artist") == 0) {
++            np_set(np->artist, sizeof(np->artist), val);
++        } else if (strcmp(key, "album") == 0) {
++            np_set(np->album, sizeof(np->album), val);
++        } else if (strcmp(key, "artwork_url") == 0) {
++            np_set(np->artwork_url, sizeof(np->artwork_url), val);
++        }
++    }
++    fclose(f);
++    return 1;
++}
++
++static int utf8_seq_len(unsigned char c) {
++    if ((c & 0x80) == 0) return 1;
++    if ((c & 0xE0) == 0xC0) return 2;
++    if ((c & 0xF0) == 0xE0) return 3;
++    if ((c & 0xF8) == 0xF0) return 4;
++    return 1;
++}
++
++// 按像素宽度截断 UTF-8 文本，放不下时以「…」收尾
++static void truncate_to_width(FontRenderer *fr, const char *src, char *out, size_t out_cap,
++                              int font_size, int is_chinese, int max_width) {
++    size_t oi = 0;
++    int w = 0;
++    if (out_cap == 0) return;
++    for (size_t i = 0; src[i] != '\0'; ) {
++        int cl = utf8_seq_len((unsigned char)src[i]);
++        if (cl >= 8) cl = 1;
++        if ((size_t)cl + 1 >= out_cap - oi) break;
++        char one[8];
++        memcpy(one, src + i, (size_t)cl);
++        one[cl] = '\0';
++        int cw = get_text_width(fr, one, font_size, is_chinese);
++        if (w + cw > max_width) {
++            if (out_cap - oi > 4) {
++                out[oi++] = (char)0xE2;   // 「…」的 UTF-8 编码
++                out[oi++] = (char)0x80;
++                out[oi++] = (char)0xA6;
++            }
++            break;
++        }
++        memcpy(out + oi, one, (size_t)cl);
++        oi += (size_t)cl;
++        w += cw;
++        i += (size_t)cl;
++    }
++    out[oi] = '\0';
++}
++
++// 布局 C：封面 96x96 在 (COVER_X, COVER_Y)
++// 注意 fb_write_pixel 会做垂直翻转（mirrored_y = height-1-y），所以 y 越大越靠屏幕上方：
++// 可见行 ≈ 131 - (y + 字号)。下面三个 Y 值是按「可见行」反推的。，歌名 14px 在 y=100，歌手 12px 在 y=116
++#define COVER_X      33
++#define COVER_Y      34
++#define COVER_SIZE   96
++#define TITLE_Y      4
++#define TITLE_SIZE   14
++#define ARTIST_Y     -8
++#define ARTIST_SIZE  12
++
++// ==================== 专辑封面（步骤 2） ====================
++#define COVER_CACHE_DIR "/tmp/showtime-cover-cache"
++
++// 丢掉原有查询串，改成服务端认识的参数：MA 的 imageproxy 只接受 size=80/160/256/512，
++// 且只有 fmt=png 能被本机（有 libpng、无 libjpeg 链接）解码。
++static void build_cover_url(const char *src, char *out, size_t cap) {
++    const char *q = strchr(src, '?');
++    size_t base = (q != NULL) ? (size_t)(q - src) : strlen(src);
++    if (base + 20 >= cap) base = cap - 21;
++    memcpy(out, src, base);
++    out[base] = '\0';
++    strcat(out, "?size=160&fmt=png");
++}
++
++static unsigned long url_hash(const char *s) {
++    unsigned long h = 2166136261UL;
++    while (*s != '\0') {
++        h ^= (unsigned char)*s++;
++        h *= 16777619UL;
++    }
++    return h;
++}
++
++static int http_get_file(const char *url, const char *path) {
++    CURL *c = curl_easy_init();
++    if (c == NULL) return 0;
++    FILE *fp = fopen(path, "wb");
++    if (fp == NULL) { curl_easy_cleanup(c); return 0; }
++    curl_easy_setopt(c, CURLOPT_URL, url);
++    curl_easy_setopt(c, CURLOPT_WRITEDATA, fp);
++    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 4L);
++    curl_easy_setopt(c, CURLOPT_TIMEOUT, 10L);
++    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
++    curl_easy_setopt(c, CURLOPT_FAILONERROR, 1L);
++    curl_easy_setopt(c, CURLOPT_USERAGENT, "akubox-showtime/1.0");
++    CURLcode rc = curl_easy_perform(c);
++    curl_easy_cleanup(c);
++    fclose(fp);
++    return rc == CURLE_OK;
++}
++
++// 等比缩放到 box x box 内，返回新图像（调用者用 free_image 释放）
++static Image *scale_image_fit(const Image *src, int box, int *out_w, int *out_h) {
++    if (src == NULL || src->width <= 0 || src->height <= 0) return NULL;
++    int tw, th;
++    if (src->width >= src->height) {
++        tw = box;
++        th = (int)((long)src->height * box / src->width);
++    } else {
++        th = box;
++        tw = (int)((long)src->width * box / src->height);
++    }
++    if (tw < 1) tw = 1;
++    if (th < 1) th = 1;
++    Image *dst = (Image *)malloc(sizeof(Image));
++    if (dst == NULL) return NULL;
++    dst->width = tw;
++    dst->height = th;
++    dst->data = (unsigned char *)malloc((size_t)tw * (size_t)th * 4);
++    if (dst->data == NULL) { free(dst); return NULL; }
++    // 面积平均降采样（源 160 -> 目标 96，比例 1.67，比最近邻干净）
++    for (int y = 0; y < th; y++) {
++        int sy0 = y * src->height / th;
++        int sy1 = (y + 1) * src->height / th;
++        if (sy1 <= sy0) sy1 = sy0 + 1;
++        if (sy1 > src->height) sy1 = src->height;
++        for (int x = 0; x < tw; x++) {
++            int sx0 = x * src->width / tw;
++            int sx1 = (x + 1) * src->width / tw;
++            if (sx1 <= sx0) sx1 = sx0 + 1;
++            if (sx1 > src->width) sx1 = src->width;
++            unsigned long r = 0, g = 0, b = 0, a = 0, n = 0;
++            for (int sy = sy0; sy < sy1; sy++) {
++                for (int sx = sx0; sx < sx1; sx++) {
++                    const unsigned char *p = src->data + ((size_t)sy * src->width + sx) * 4;
++                    r += p[0]; g += p[1]; b += p[2]; a += p[3];
++                    n++;
++                }
++            }
++            unsigned char *d = dst->data + ((size_t)y * tw + x) * 4;
++            if (n == 0) n = 1;
++            d[0] = (unsigned char)(r / n);
++            d[1] = (unsigned char)(g / n);
++            d[2] = (unsigned char)(b / n);
++            d[3] = (unsigned char)(a / n);
++        }
++    }
++    *out_w = tw;
++    *out_h = th;
++    return dst;
++}
++
++// URL 变化时才加载；失败返回 NULL（调用方降级为纯文字）
++static Image *get_cover(const char *artwork_url, int *out_w, int *out_h) {
++    static char loaded_url[512] = "";
++    static Image *cover = NULL;
++    static int cover_w = 0, cover_h = 0;
++
++    if (strcmp(artwork_url, loaded_url) == 0) {
++        *out_w = cover_w;
++        *out_h = cover_h;
++        return cover;
++    }
++    if (cover != NULL) { free_image(cover); cover = NULL; }
++    cover_w = 0;
++    cover_h = 0;
++    snprintf(loaded_url, sizeof(loaded_url), "%s", artwork_url);
++
++    if (artwork_url[0] == '\0') { *out_w = 0; *out_h = 0; return NULL; }
++
++    char url[640];
++    build_cover_url(artwork_url, url, sizeof(url));
++    char cache_path[256];
++    snprintf(cache_path, sizeof(cache_path), "%s/%08lx.png", COVER_CACHE_DIR, url_hash(url));
++
++    struct stat st;
++    if (stat(cache_path, &st) != 0 || st.st_size <= 0) {
++        mkdir(COVER_CACHE_DIR, 0755);   // 已存在返回 EEXIST，忽略
++        if (!http_get_file(url, cache_path)) {
++            unlink(cache_path);
++            *out_w = 0;
++            *out_h = 0;
++            return NULL;
++        }
++    }
++    Image *raw = load_png(cache_path);
++    if (raw == NULL) { *out_w = 0; *out_h = 0; return NULL; }
++    cover = scale_image_fit(raw, COVER_SIZE, &cover_w, &cover_h);
++    free_image(raw);
++    *out_w = cover_w;
++    *out_h = cover_h;
++    return cover;
++}
++
++static void draw_song_screen(FrameBuffer *fb, FontRenderer *fr, const NowPlaying *np) {
++    char tmp[260];
++
++    // 封面：底边固定在可见行 97（代码坐标 y=COVER_Y），所以文字位置不随封面高度变化
++    int cover_w = 0, cover_h = 0;
++    Image *cover = get_cover(np->artwork_url, &cover_w, &cover_h);
++    if (cover != NULL && cover_w > 0 && cover_h > 0) {
++        draw_image(fb, cover, COVER_X + (COVER_SIZE - cover_w) / 2, COVER_Y);
++    }
++    if (np->title[0] != '\0') {
++        truncate_to_width(fr, np->title, tmp, sizeof(tmp), TITLE_SIZE, 1, fb->width);
++        int w = get_text_width(fr, tmp, TITLE_SIZE, 1);
++        draw_text(fb, fr, tmp, (fb->width - w) / 2, TITLE_Y, 255, 255, 255, TITLE_SIZE, 1);
++    } else {
++        const char *unknown = "未知曲目";
++        int w = get_text_width(fr, unknown, TITLE_SIZE, 1);
++        draw_text(fb, fr, unknown, (fb->width - w) / 2, TITLE_Y, 130, 130, 130, TITLE_SIZE, 1);
++    }
++    if (np->artist[0] != '\0') {
++        truncate_to_width(fr, np->artist, tmp, sizeof(tmp), ARTIST_SIZE, 1, fb->width);
++        int w = get_text_width(fr, tmp, ARTIST_SIZE, 1);
++        draw_text(fb, fr, tmp, (fb->width - w) / 2, ARTIST_Y, 150, 150, 150, ARTIST_SIZE, 1);
++    }
++}
++
+ // 显示时间和电池状态
+ void show_time_and_battery(FrameBuffer *fb, FontRenderer *fr, Image *charging_icon, Image *battery_icon) {
+     time_t now;
+@@ -713,6 +973,33 @@
+         snprintf(capacity_str_vol, sizeof(capacity_str_vol), "vol:%d%%", vol_capacity);
+         
+         fb_clear_back_buffer(fb, 0, 0, 0); // Clear screen
++
++        // COMPAT (akubox): 播放中显示曲目；停止满 CLOCK_RESUME_DELAY_S 秒后才回到时钟。
++        static NowPlaying np_disp;
++        static time_t last_playing_at = 0;
++        NowPlaying np_now;
++        if (read_nowplaying(&np_now)) {
++            if (np_now.title[0] != '\0')
++                np_set(np_disp.title, sizeof(np_disp.title), np_now.title);
++            if (np_now.artist[0] != '\0')
++                np_set(np_disp.artist, sizeof(np_disp.artist), np_now.artist);
++            if (np_now.album[0] != '\0')
++                np_set(np_disp.album, sizeof(np_disp.album), np_now.album);
++            if (np_now.artwork_url[0] != '\0')
++                np_set(np_disp.artwork_url, sizeof(np_disp.artwork_url), np_now.artwork_url);
++            np_disp.playing = np_now.playing;
++        }
++        int show_song = 0;
++        if (np_disp.playing) {
++            last_playing_at = now;
++            show_song = 1;
++        } else if (last_playing_at != 0 && (now - last_playing_at) <= CLOCK_RESUME_DELAY_S) {
++            show_song = 1;   // 短暂保持曲目，避免切歌瞬间闪回时钟
++        }
++
++        if (show_song) {
++            draw_song_screen(fb, fr, &np_disp);
++        } else {
+         
+         // --- Time Drawing Logic ---
+         int time_base_x = 0;      // Original X position for time
+@@ -769,6 +1056,8 @@
+             draw_image(fb, charging_icon, 70, battery_y + 65);
+         }
+         
++        }  // end clock branch
++
+         fb_update_screen(fb);
+         
+         sleep(1 - (now % 1)); // Approx 1 sec sleep
+@@ -777,6 +1066,7 @@
+ 
+ // ... (main function and other functions remain the same) ...
+ int main(int argc, char *argv[]) {
++    curl_global_init(CURL_GLOBAL_DEFAULT);
+     FrameBuffer fb;
+     FontRenderer fr;
+     Image *charging_icon = NULL;

@@ -238,6 +238,29 @@ if (config_parser.has_key("FRIENDLY_NAME")) {
 要在 HA 里也换成新名，需在 Music Assistant 里改名：**设置 → 播放器 → 该设备 → 重命名**，
 或删除该播放器后重新添加（MA 会按新名称重建）。**不影响播放功能。**
 
+## 屏幕显示曲目（可选）
+
+AkuBox 有一块 162×132 的 SPI 小屏，默认只显示时钟。加上屏幕补丁后：**播放时显示专辑封面 +
+歌名 + 歌手，停止播放 5 秒后自动回到时钟**。
+
+```bash
+# 装播放器时一并装上
+sudo bash install.sh --with-display
+
+# 或者播放器已装好，单独装屏幕部分
+sudo bash showtime/install-showtime-nowplaying.sh
+```
+
+实现方式与 MQTT / HA 自动化无关 —— sendspin 协议本身就把元数据送到了设备，客户端补丁 `0003`
+把 `title / artist / album / artwork_url` 写成一个 `key=value` 小文件
+（`/var/lib/sendspin-client/nowplaying`），屏幕程序每秒读一次。
+
+封面走 MA 的 imageproxy，统一请求 `size=160&fmt=png`（**该接口只接受 80/160/256/512**，
+且本机链接的是 libpng 而非 libjpeg），下载后按 URL 哈希缓存在
+`/tmp/showtime-cover-cache/`，等比缩放到 96×96 内显示；失败则降级为纯文字。
+
+详见 [`showtime/README.md`](showtime/README.md)。
+
 ## 卸载
 
 ```bash
@@ -287,12 +310,17 @@ nmcli con up <连接UUID>
 
 ```
 .
-├── install.sh                               # 一键安装脚本
+├── install.sh                               # 一键安装脚本（--with-display 含屏幕部分）
 ├── rename.sh                                # 安装后改名（无需重新编译）
 ├── uninstall.sh                             # 卸载脚本
 ├── patches/
 │   ├── 0001-sendspin-cpp-legacy-ma-compat.patch   # 差异 1-6（Noise / hello / state / server 命令）
-│   └── 0002-sendspin-client-16bit-pcm-only.patch  # 差异 7（只宣告 16-bit PCM）
+│   ├── 0002-sendspin-client-16bit-pcm-only.patch  # 差异 7（只宣告 16-bit PCM）
+│   └── 0003-sendspin-client-nowplaying-bridge.patch # 曲目信息落盘（供屏幕显示）
+├── showtime/                                # 屏幕"正在播放"界面（可选）
+│   ├── README.md
+│   ├── install-showtime-nowplaying.sh
+│   └── patches/showtime-nowplaying.patch    # 对厂商 showtime.c 的改动
 ├── config/sendspin-client.conf.example      # 配置样例
 └── systemd/sendspin-client.service          # systemd 单元参考
 ```

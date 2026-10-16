@@ -1,0 +1,90 @@
+# showtime 正在播放界面（歌名 / 歌手 / 封面）
+
+把 AkuBox 那块 162×132 的 SPI 小屏从"只有时钟"变成**播放时显示封面 + 歌名 + 歌手**，
+停止播放 5 秒后自动回到时钟。
+
+```
+空闲（停止 >5 秒）           播放中
+┌──────────────────┐        ┌──────────────────┐
+│ vol:42      96%  │        │   ┌──────────┐   │
+│ 2026-10-16 星期五│        │   │  专辑封面 │   │
+│                  │        │   │  96×96   │   │
+│     22:20        │        │   └──────────┘   │
+└──────────────────┘        │     红尘客栈      │  ← 14px 白
+                            │      周杰伦       │  ← 12px 灰
+                            └──────────────────┘
+```
+
+## 安装
+
+```bash
+sudo bash install-showtime-nowplaying.sh
+```
+
+脚本会装编译依赖、应用补丁、编译、备份并替换二进制、重启服务。
+
+**前置条件**：客户端补丁 `0003-sendspin-client-nowplaying-bridge.patch`（本仓库 `patches/`）
+需要已经装上 —— 它负责把当前曲目写到 `/var/lib/sendspin-client/nowplaying`。
+没装那个补丁也能编译运行，只是永远显示时钟，不会出错。
+
+## 数据从哪来
+
+不需要 MQTT，也不需要 Home Assistant 自动化。sendspin 协议本身就把元数据送到了设备：
+客户端的 `MetadataRoleListener::on_metadata()` 收到 `title / artist / album / artwork_url`，
+补丁 0003 把它们写成一个 `key=value` 小文件：
+
+```
+state=playing
+title=红尘客栈
+artist=周杰伦
+album=十二新作
+artwork_url=http://192.168.101.75:8095/imageproxy/0103cf…?size=512&fmt=jpg
+```
+
+showtime 每秒读一次该文件。这不是新增的通道，只是把客户端**已经收到**的信息落到磁盘。
+
+## 关键实现点
+
+| 点 | 说明 |
+|---|---|
+| **帧缓冲是上下翻转的** | `fb_write_pixel()` 里 `mirrored_y = height - 1 - y`。所以**代码里 y 越大越靠屏幕上方**，可见行 ≈ `131 - (y + 字号)`。最初按"y 越大越靠下"写，结果标题跑到顶部、歌手被挤出屏幕外 |
+| 封面尺寸只认 80/160/256/512 | MA 的 imageproxy 只接受这几个尺寸（128/120/100 都返回 400），统一请求 `size=160&fmt=png` |
+| 必须用 PNG | 请求端的 `fmt=jpg` 是默认值，但本机链接的是 libpng；PNG 由 MA 现场转码提供（实测 160×160、58KB）|
+| 缩放 | 源 160 → 目标 96，用**面积平均**（1.67 倍降采样），比最近邻干净 |
+| 缓存 | 按 URL 的 FNV-1a 哈希缓存到 `/tmp/showtime-cover-cache/`，同一首重播不再下载 |
+| 降级 | 封面下载/解码失败就只画文字，不影响可用性 |
+| 时钟回退 | 播放中不画时钟；**停止满 5 秒**才回时钟。5 秒窗口内保持曲目，避免切歌时闪回时钟 |
+
+## 分辨率约束
+
+162×132 能放多少字（实测像素宽度）：
+
+| 字号 | 每行中文 | 用途 |
+|---|---|---|
+| 14px | 11 字 | 歌名（超出截断加「…」）|
+| 12px | 13 字 | 歌手 |
+
+版面（可见行，从屏幕顶部算）：
+
+```
+封面 96×96   x 33..128   y 2..97
+歌名 14px              y 97..113
+歌手 12px              y 114..131
+```
+
+封面底边固定在可见行 97，所以换不同高度的封面时**文字位置不会跳动**。
+
+## 回滚
+
+```bash
+systemctl stop showtime
+cp -a /opt/aku/showtime/showtime.pre-nowplaying /opt/aku/showtime/showtime
+systemctl start showtime
+cp -a /opt/aku/showtime/showtime.c.pre-nowplaying /opt/aku/showtime/showtime.c
+```
+
+## 说明
+
+- 本目录只包含**对厂商文件的补丁**，不重新分发 showtime 源码（它随设备预装）。
+- 补丁内含两个阶段的改动：先文字、后封面。两者已在真机验证。
+- `showtime` 只写 `/dev/fb0`，不碰声卡，与 sendspin 播放完全独立。

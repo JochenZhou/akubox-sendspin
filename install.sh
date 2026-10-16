@@ -55,6 +55,7 @@ RUN_USER="sendspin"
 JOBS=1
 BUILD_ONLY=0
 SKIP_LEGACY_PATCH=0
+WITH_DISPLAY=0
 FREE_AUDIO=0
 FREE_AUDIO_EXPLICIT=0
 ASSUME_YES=0
@@ -115,6 +116,8 @@ AkuBox Sendspin Client 安装脚本
   --jobs <N>             编译并行度（默认: ${JOBS}；AkuBox 单核建议 1）
   --patch-dir <路径>     指定补丁目录（默认: 脚本同级 patches/，否则自动下载）
   --build-only           只克隆+打补丁+编译，不安装、不写 systemd
+  --with-display         同时给设备屏幕程序（showtime）加"正在播放"界面
+                         （封面 + 歌名 + 歌手；仅当本机有 /opt/aku/showtime 时生效）
   --skip-legacy-ma-patch 不应用 MA 2.10.x 兼容补丁（仅当 MA >= 2.11 / aiosendspin 10.x）
   --free-audio           停止并禁用探测到的声卡争用服务（非交互时仍需 -y 才不再询问）
   --free-audio-services <列表>
@@ -144,6 +147,7 @@ while [ $# -gt 0 ]; do
     --jobs)                JOBS="${2:?--jobs 需要参数}"; shift 2 ;;
     --patch-dir)           PATCH_DIR="${2:?--patch-dir 需要参数}"; shift 2 ;;
     --build-only)          BUILD_ONLY=1; shift ;;
+    --with-display)        WITH_DISPLAY=1; shift ;;
     --skip-legacy-ma-patch) SKIP_LEGACY_PATCH=1; shift ;;
     --free-audio)          FREE_AUDIO=1; shift ;;
     --free-audio-services)
@@ -500,7 +504,9 @@ ensure_patches() {
   local tmp; tmp="$(mktemp -d)"
   mkdir -p "${tmp}/patches"
   local f url got
-  for f in 0001-sendspin-cpp-legacy-ma-compat.patch 0002-sendspin-client-16bit-pcm-only.patch; do
+  for f in 0001-sendspin-cpp-legacy-ma-compat.patch \
+           0002-sendspin-client-16bit-pcm-only.patch \
+           0003-sendspin-client-nowplaying-bridge.patch; do
     got=0
     for url in "${RAW_MIRRORS[@]}"; do
       if curl -fsSL --connect-timeout 15 -o "${tmp}/patches/${f}" "${url}/patches/${f}" 2>/dev/null \
@@ -542,6 +548,11 @@ apply_patches() {
   apply_one_patch "$INSTALL_DIR" \
     "${PATCH_DIR}/0002-sendspin-client-16bit-pcm-only.patch" \
     "sendspin-client: 只宣告 16-bit PCM（避免服务端协商到解不了的位深而静音）"
+  # 把当前曲目写到 /var/lib/sendspin-client/nowplaying，供设备屏幕程序读取。
+  # 不写这个文件也不影响播放；文件不会被任何东西消费时它只是静静地放着。
+  apply_one_patch "$INSTALL_DIR" \
+    "${PATCH_DIR}/0003-sendspin-client-nowplaying-bridge.patch" \
+    "sendspin-client: 曲目信息落盘（供屏幕显示歌名/封面）"
 }
 
 # ---------------------------- 编译 ----------------------------
@@ -672,6 +683,30 @@ summary() {
 EOF
 }
 
+# ---------------------------- 可选：屏幕"正在播放"界面 ----------------------------
+install_display() {
+  hr; log "安装屏幕「正在播放」界面"
+  local self_dir=""
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  fi
+  local script="${self_dir}/showtime/install-showtime-nowplaying.sh"
+  if [ ! -f "$script" ]; then
+    warn "未找到 ${script}（单文件方式运行时没有该目录），跳过"
+    return 0
+  fi
+  if [ ! -f /opt/aku/showtime/showtime.c ]; then
+    warn "本机没有 /opt/aku/showtime/showtime.c，跳过屏幕改造"
+    return 0
+  fi
+  if bash "$script" -y; then
+    ok "屏幕界面已安装"
+  else
+    warn "屏幕界面安装失败 —— 播放器本身不受影响，可稍后单独运行该脚本"
+    return 0
+  fi
+}
+
 # ---------------------------- 主流程 ----------------------------
 main() {
   printf '%s\n' "======================================================================"
@@ -695,6 +730,10 @@ main() {
 
   install_client
   summary
+
+  if [ "$WITH_DISPLAY" -eq 1 ]; then
+    install_display
+  fi
 }
 
 main "$@"

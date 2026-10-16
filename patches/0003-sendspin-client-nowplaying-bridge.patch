@@ -1,0 +1,85 @@
+--- a/src/main.cpp	2026-10-16 22:36:37.000000000 +0800
++++ b/src/main.cpp	2026-10-16 22:36:37.000000000 +0800
+@@ -332,6 +332,36 @@
+     }
+ };
+ 
++// ==================== nowplaying 桥接（COMPAT PATCH akubox） ====================
++// 设备上的显示程序（showtime）每秒轮询这个文件。格式为每行一个 "key=value"，值里的换行
++// 已替换成空格，所以读取端按第一个 '=' 切分即可。先写临时文件再 rename，读取端不会读到写
++// 到一半的内容。显示是尽力而为：这里任何失败都忽略，绝不影响播放。
++static std::string g_nowplaying_path;
++static bool        g_np_playing = false;
++static std::string g_np_title, g_np_artist, g_np_album, g_np_url;
++
++static std::string np_flatten(const std::string& in) {
++    std::string out = in;
++    for (char& c : out) {
++        if (c == '\n' || c == '\r') c = ' ';
++    }
++    return out;
++}
++
++static void nowplaying_write(bool playing) {
++    if (g_nowplaying_path.empty()) return;
++    const std::string tmp = g_nowplaying_path + ".tmp";
++    FILE* f = fopen(tmp.c_str(), "w");
++    if (f == nullptr) return;
++    fprintf(f, "state=%s\n", playing ? "playing" : "idle");
++    if (!g_np_title.empty())  fprintf(f, "title=%s\n", np_flatten(g_np_title).c_str());
++    if (!g_np_artist.empty()) fprintf(f, "artist=%s\n", np_flatten(g_np_artist).c_str());
++    if (!g_np_album.empty())  fprintf(f, "album=%s\n", np_flatten(g_np_album).c_str());
++    if (!g_np_url.empty())    fprintf(f, "artwork_url=%s\n", np_flatten(g_np_url).c_str());
++    fclose(f);
++    rename(tmp.c_str(), g_nowplaying_path.c_str());
++}
++
+ int main(int argc, char* argv[]) {
+     // Set up signal handler for clean shutdown
+     std::signal(SIGINT, signal_handler);
+@@ -688,6 +718,8 @@
+         void on_stream_start() override {
+             fprintf(stderr, ">>> Stream started\n");
+             this->stream_active = true;
++            g_np_playing = true;
++            nowplaying_write(true);
+             this->device_open = true;
+             auto& params = player.get_current_stream_params();
+             if (params.sample_rate.has_value() && params.channels.has_value() &&
+@@ -702,6 +734,8 @@
+         void on_stream_end() override {
+             fprintf(stderr, ">>> Stream ended\n");
+             this->stream_active = false;
++            g_np_playing = false;
++            nowplaying_write(false);
+             this->last_stream_end_time = std::chrono::steady_clock::now();
+             
+             if (this->idle_timeout_s > 0) {
+@@ -721,6 +755,12 @@
+                 fprintf(stderr, ">>> Metadata: %s - %s\n",
+                         md.artist.value_or("Unknown").c_str(), md.title->c_str());
+             }
++            // 只覆盖服务端真给了值的字段：流刚开始时常先收到一条全空状态。
++            if (md.title.has_value()) g_np_title = md.title.value();
++            if (md.artist.has_value()) g_np_artist = md.artist.value();
++            if (md.album.has_value()) g_np_album = md.album.value();
++            if (md.artwork_url.has_value()) g_np_url = md.artwork_url.value();
++            nowplaying_write(g_np_playing);
+         }
+     };
+ 
+@@ -751,6 +791,14 @@
+     HostPersistenceProvider persistence_provider(
+         state_dir_env != nullptr && state_dir_env[0] != '\0' ? state_dir_env : "/var/lib/sendspin-client");
+ 
++    // COMPAT PATCH (akubox): 与状态目录同放；客户端以 sendspin 用户可写，showtime 以 root 读。
++    g_nowplaying_path =
++        std::string(state_dir_env != nullptr && state_dir_env[0] != '\0' ? state_dir_env
++                                                                         : "/var/lib/sendspin-client") +
++        "/nowplaying";
++    g_np_playing = false;
++    nowplaying_write(false);   // 覆盖上次运行遗留的 playing 状态
++
+     player.set_listener(&player_listener);
+     metadata.set_listener(&metadata_listener);
+     client.set_listener(&client_listener);
