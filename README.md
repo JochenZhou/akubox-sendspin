@@ -238,10 +238,21 @@ if (config_parser.has_key("FRIENDLY_NAME")) {
 要在 HA 里也换成新名，需在 Music Assistant 里改名：**设置 → 播放器 → 该设备 → 重命名**，
 或删除该播放器后重新添加（MA 会按新名称重建）。**不影响播放功能。**
 
-## 屏幕显示曲目（可选）
+## 屏幕显示：黑胶播放页 + 时钟页（可选）
 
-AkuBox 有一块 162×132 的 SPI 小屏，默认只显示时钟。加上屏幕补丁后：**播放时显示专辑封面 +
-歌名，停止播放 5 秒后自动回到时钟**；时钟页去掉日期与星期，把时间放大到屏宽允许的最大字号。
+AkuBox 有一块 162×132 的 SPI 小屏，默认只显示时钟。加上屏幕补丁后变成两种界面：
+
+| 播放中 | 停止 5 秒后 |
+|---|---|
+| ![黑胶播放页](showtime/screenshots/player-vinyl.png) | ![时钟页](showtime/screenshots/clock.png) |
+| **圆形旋转封面**（黑胶唱片，不显示歌名） | **大号白色时间** + 顶部状态行 |
+
+（均为真机 `/dev/fb0` 抓帧，6 倍最近邻放大）
+
+- **播放页**：专辑封面逆时针旋转，130px 直径、24°/秒（约 15 秒一圈）、30fps 双线性采样。
+  暂停/结束时**立即停转并停在当前角度**（不清零），恢复播放接着转。
+- **时钟页**：时间用大字号撑高、再用 FreeType 水平变换压窄（非等比、瘦高，实测 141×91），
+  颜色**白色**；日期与星期已移除；顶部保留 `vol:NN%` / 充电图标 / 电量。
 
 ```bash
 # 装播放器时一并装上
@@ -257,9 +268,13 @@ sudo bash showtime/install-showtime-nowplaying.sh
 
 封面走 MA 的 imageproxy，统一请求 `size=160&fmt=png`（**该接口只接受 80/160/256/512**，
 且本机链接的是 libpng 而非 libjpeg），下载后按 URL 哈希缓存在
-`/tmp/showtime-cover-cache/`，等比缩放到 120×120 内显示；失败则降级为纯文字。
+`/tmp/showtime-cover-cache/`，面积平均缩放到 130×130；失败则降级为深灰圆盘。
 
-详见 [`showtime/README.md`](showtime/README.md)。
+**性能**：这块屏在单核 1GHz 的 ARMv7 上很容易吃掉整个 CPU。实测踩过两个坑 ——
+厂商代码每帧 `popen("amixer|grep|awk")`（一次 fork 4 个进程，提到 30fps 后变 64 次/秒，
+白烧 ~60% 单核），以及逐像素浮点在这颗 CPU 的 VFP 上的串行高延迟。
+修复后 30fps 下 showtime 占 **16-17%**、整机 21-23%（修前分别是 57% / 96%）。
+实现细节、参数表与验证方法见 [`showtime/README.md`](showtime/README.md)。
 
 ## 卸载
 
@@ -317,9 +332,12 @@ nmcli con up <连接UUID>
 │   ├── 0001-sendspin-cpp-legacy-ma-compat.patch   # 差异 1-6（Noise / hello / state / server 命令）
 │   ├── 0002-sendspin-client-16bit-pcm-only.patch  # 差异 7（只宣告 16-bit PCM）
 │   └── 0003-sendspin-client-nowplaying-bridge.patch # 曲目信息落盘（供屏幕显示）
-├── showtime/                                # 屏幕"正在播放"界面（可选）
+├── showtime/                                # 屏幕界面：黑胶播放页 + 时钟页（可选）
 │   ├── README.md
 │   ├── install-showtime-nowplaying.sh
+│   ├── screenshots/                         # 真机抓帧（README 用图）
+│   │   ├── player-vinyl.png
+│   │   └── clock.png
 │   └── patches/showtime-nowplaying.patch    # 对厂商 showtime.c 的改动
 ├── config/sendspin-client.conf.example      # 配置样例
 └── systemd/sendspin-client.service          # systemd 单元参考

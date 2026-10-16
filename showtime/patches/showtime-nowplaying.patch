@@ -1,16 +1,17 @@
---- a/showtime.c	2026-10-16 23:11:50.000000000 +0800
-+++ b/showtime.c	2026-10-16 23:11:50.000000000 +0800
-@@ -12,6 +12,9 @@
+--- a/showtime.c
++++ b/showtime.c
+@@ -12,6 +12,10 @@
  //#include <gif_lib.h>
  #include FT_FREETYPE_H
  #include <dirent.h>
 +#include <sys/stat.h>
 +#include <sys/types.h>
 +#include <curl/curl.h>
++#include <math.h>
  #define VOLUME_MIN 0
  #define VOLUME_MAX 63
  // 帧缓冲结构体
-@@ -669,6 +672,263 @@
+@@ -669,6 +673,287 @@
  
  // (Place get_text_width function here or elsewhere appropriate)
  
@@ -63,55 +64,20 @@
 +    return 1;
 +}
 +
-+static int utf8_seq_len(unsigned char c) {
-+    if ((c & 0x80) == 0) return 1;
-+    if ((c & 0xE0) == 0xC0) return 2;
-+    if ((c & 0xF0) == 0xE0) return 3;
-+    if ((c & 0xF8) == 0xF0) return 4;
-+    return 1;
-+}
 +
 +// 按像素宽度截断 UTF-8 文本，放不下时以「…」收尾
-+static void truncate_to_width(FontRenderer *fr, const char *src, char *out, size_t out_cap,
-+                              int font_size, int is_chinese, int max_width) {
-+    size_t oi = 0;
-+    int w = 0;
-+    if (out_cap == 0) return;
-+    for (size_t i = 0; src[i] != '\0'; ) {
-+        int cl = utf8_seq_len((unsigned char)src[i]);
-+        if (cl >= 8) cl = 1;
-+        if ((size_t)cl + 1 >= out_cap - oi) break;
-+        char one[8];
-+        memcpy(one, src + i, (size_t)cl);
-+        one[cl] = '\0';
-+        int cw = get_text_width(fr, one, font_size, is_chinese);
-+        if (w + cw > max_width) {
-+            if (out_cap - oi > 4) {
-+                out[oi++] = (char)0xE2;   // 「…」的 UTF-8 编码
-+                out[oi++] = (char)0x80;
-+                out[oi++] = (char)0xA6;
-+            }
-+            break;
-+        }
-+        memcpy(out + oi, one, (size_t)cl);
-+        oi += (size_t)cl;
-+        w += cw;
-+        i += (size_t)cl;
-+    }
-+    out[oi] = '\0';
-+}
 +
-+// 布局 C：封面 96x96 在 (COVER_X, COVER_Y)
-+// 注意 fb_write_pixel 会做垂直翻转（mirrored_y = height-1-y），所以 y 越大越靠屏幕上方：
-+// 可见行 ≈ 131 - (y + 字号)。下面三个 Y 值是按「可见行」反推的。，歌名 14px 在 y=100，歌手 12px 在 y=116
-+// 版面（按可见行，从屏幕顶算；fb_write_pixel 会做垂直翻转，换算见上）：
-+//   封面 120x120   x 21..140    可见 y 0..119
-+//   歌名 12px                   可见 y ~118..130（只一行；封面底边压在歌名上沿 2 行，文字后画覆盖之）
-+#define COVER_X      21
-+#define COVER_Y      12
-+#define COVER_SIZE   120
-+#define TITLE_Y      (-11)
-+#define TITLE_SIZE   12
++// 黑胶模式版面（都按可见坐标；注意 fb_write_pixel 会垂直翻转，代码 y 与可见 y 相反）：
++//   圆盘直径 130、圆心 x=81 / 代码 y=66 → 覆盖可见行 0..130、x 16..146，几乎撑满 132 高的屏
++//   中心轴孔半径 5；封面缩放到圆盘直径后 1:1 采样（不放大），所以不需要再单独定位
++#define VINYL_DIAMETER    130
++#define VINYL_RADIUS      (VINYL_DIAMETER / 2)
++#define VINYL_CX          (162 / 2)
++#define VINYL_CY          66
++#define VINYL_DEG_PER_SEC 24.0             /* 约 15 秒转一圈 */
++#define VINYL_PI          3.14159265358979
++#define VINYL_FRAME_S     0.033            /* 目标帧周期 33ms ≈ 30fps */
++#define COVER_SIZE        VINYL_DIAMETER   /* get_cover 用它缩放源图 */
 +// 时间数字字号：决定高度（字形高 ≈ 0.91×字号）。状态行以下是可见行 38..131（约 94 行），
 +// 取 100 → 字形高约 91 行接近撑满；宽度交给下面的水平压缩，不再受宽度约束。
 +#define TIME_FONT_SIZE 100
@@ -250,34 +216,111 @@
 +    return cover;
 +}
 +
-+static void draw_song_screen(FrameBuffer *fb, FontRenderer *fr, const NowPlaying *np) {
-+    char tmp[260];
++// 单调时钟（秒，小数）。用它算旋转角，动画速度就不受实际帧率抖动影响。
++static double now_monotonic(void) {
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
++}
 +
-+    // 封面：底边固定在可见行 97（代码坐标 y=COVER_Y），所以文字位置不随封面高度变化
-+    int cover_w = 0, cover_h = 0;
-+    Image *cover = get_cover(np->artwork_url, &cover_w, &cover_h);
-+    if (cover != NULL && cover_w > 0 && cover_h > 0) {
-+        draw_image(fb, cover, COVER_X + (COVER_SIZE - cover_w) / 2, COVER_Y);
++// 黑胶唱片：把封面按圆形遮罩贴出来，并整体旋转。
++//   逐目标像素做「逆旋转」采样：屏幕点 → 反向转到图像坐标 → 双线性取样；
++//   圆外一律不画（留黑）= 天然圆形遮罩，不需要额外的 alpha 掩码图。
++//
++//   **全部用定点整数**：这颗 1GHz ARMv7 的 VFP 是串行高延迟（实测 1e6 次 float 乘加要 70ms），
++//   浮点版每像素 30+ 次浮点 → 14-19ms/帧，30fps 就吃掉 ~57% 单核。定点后降到几毫秒。
++//   采样用 16.16 坐标 + 8 位权重（精度足够），并直接写后备缓冲（垂直翻转每行只算一次，
++//   不再逐像素调 fb_write_pixel 重复算镜像与边界）。
++static void draw_vinyl(FrameBuffer *fb, const Image *img, double angle_deg) {
++    double rad = angle_deg * VINYL_PI / 180.0;
++    const int CA = (int)(cos(rad) * 65536.0);          /* 16.16 定点 */
++    const int SA = (int)(sin(rad) * 65536.0);
++    const int cx = VINYL_CX, cy = VINYL_CY, R = VINYL_RADIUS;
++    const int r2max = R * R;
++    const int have_img = (img != NULL && img->width > 1 && img->height > 1);
++    const int iw = have_img ? img->width : 0;
++    const int ih = have_img ? img->height : 0;
++    const unsigned char *data = have_img ? img->data : NULL;
++    /* 归一化偏移 [-R,R] → 图像像素 [0,iw]：u*iw/(2R) + iw/2，都用 16.16 预存 */
++    const int sx_fp = have_img ? (int)(((long)iw << 16) / (2 * R)) : 0;
++    const int sy_fp = have_img ? (int)(((long)ih << 16) / (2 * R)) : 0;
++    const int ox_fp = have_img ? (iw << 15) : 0;
++    const int oy_fp = have_img ? (ih << 15) : 0;
++    unsigned short *bb = (unsigned short *)fb->back_buffer;
++
++    for (int y = cy - R; y <= cy + R; y++) {
++        if (y < 0 || y >= fb->height) continue;
++        int dy = y - cy;
++        int r2y = dy * dy;
++        int vs = -dy;
++        /* fb_write_pixel 会做垂直翻转（mirrored_y = height-1-y），这里每行算一次 */
++        unsigned short *row = bb + (long)(fb->height - 1 - y) * fb->width;
++        for (int x = cx - R; x <= cx + R; x++) {
++            if (x < 0 || x >= fb->width) continue;
++            int dx = x - cx;
++            if (dx * dx + r2y > r2max) continue;            /* 圆外：留黑 */
++
++            if (!have_img) {
++                row[x] = 0x18E3;                            /* rgb(24,24,24) 的 RGB565 */
++                continue;
++            }
++            /* 逆旋转：屏幕点 -> 图像坐标（代码 y 与可见 y 相反，所以 vs = -dy） */
++            int ui = (CA * dx + SA * vs) >> 16;
++            int vi = (-SA * dx + CA * vs) >> 16;
++            /* sx_fp 已是 16.16 的比例因子，ui*sx_fp 直接就是 16.16 像素坐标；
++               这里**不能**再 >>16 —— 多移一次会把结果降回 ±R 单位，加上 16.16 的 ox_fp
++               后 x0 几乎不变，整张图会退化成采样中心一个像素（曾因此封面变纯色）。 */
++            int fx = (int)((long)ui * sx_fp) + ox_fp;          /* 16.16 像素坐标 */
++            int fy = (int)((long)vi * sy_fp) + oy_fp;
++            int x0 = fx >> 16;
++            int y0 = fy >> 16;
++            int tx = (fx >> 8) & 0xFF;
++            int ty = (fy >> 8) & 0xFF;
++            if (x0 < 0) { x0 = 0; tx = 0; }
++            if (y0 < 0) { y0 = 0; ty = 0; }
++            if (x0 > iw - 2) { x0 = iw - 2; tx = 255; }
++            if (y0 > ih - 2) { y0 = ih - 2; ty = 255; }
++            const unsigned char *p00 = data + ((long)y0 * iw + x0) * 4;
++            const unsigned char *p10 = p00 + 4;
++            const unsigned char *p01 = data + ((long)(y0 + 1) * iw + x0) * 4;
++            const unsigned char *p11 = p01 + 4;
++            int w00 = ((256 - tx) * (256 - ty)) >> 8;
++            int w10 = (tx * (256 - ty)) >> 8;
++            int w01 = ((256 - tx) * ty) >> 8;
++            int w11 = 256 - w00 - w10 - w01;
++            unsigned char r = (unsigned char)((p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11) >> 8);
++            unsigned char g = (unsigned char)((p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11) >> 8);
++            unsigned char b = (unsigned char)((p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11) >> 8);
++            row[x] = (unsigned short)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
++        }
 +    }
-+    if (np->title[0] != '\0') {
-+        truncate_to_width(fr, np->title, tmp, sizeof(tmp), TITLE_SIZE, 1, fb->width);
-+        int w = get_text_width(fr, tmp, TITLE_SIZE, 1);
-+        draw_text(fb, fr, tmp, (fb->width - w) / 2, TITLE_Y, 255, 255, 255, TITLE_SIZE, 1);
-+    } else {
-+        const char *unknown = "未知曲目";
-+        int w = get_text_width(fr, unknown, TITLE_SIZE, 1);
-+        draw_text(fb, fr, unknown, (fb->width - w) / 2, TITLE_Y, 130, 130, 130, TITLE_SIZE, 1);
-+    }
-+    // 只显示一行歌名，不再画歌手（版面让给封面）
 +}
 +
  // 显示时间和电池状态
  void show_time_and_battery(FrameBuffer *fb, FontRenderer *fr, Image *charging_icon, Image *battery_icon) {
      time_t now;
-@@ -713,42 +973,92 @@
-         snprintf(capacity_str_vol, sizeof(capacity_str_vol), "vol:%d%%", vol_capacity);
+@@ -678,7 +963,6 @@
+     char minute_str[3];   // For "MM"
+     const char *colon_str = ":";
+     
+-    char date_str[11];
+     char battery_status[32];
+     char vol_status[32]; // Assuming you meant to use this if declared
+     int battery_capacity;
+@@ -699,8 +983,6 @@
          
-         fb_clear_back_buffer(fb, 0, 0, 0); // Clear screen
+         static int show_colon_for_time = 0; // Show colon on even seconds
+         show_colon_for_time = !show_colon_for_time;
+-        strftime(date_str, sizeof(date_str), "%Y-%m-%d", tm_now);
+-        const char* weekday_str = get_chinese_weekday(tm_now->tm_wday);
+         
+         if (read_battery_status(battery_status, &battery_capacity) == 0) {
+             snprintf(capacity_str, sizeof(capacity_str), "%d%%", battery_capacity);
+@@ -709,46 +991,117 @@
+             strcpy(capacity_str, "N/A");
+         }
+         
++        fb_clear_back_buffer(fb, 0, 0, 0); // Clear screen
 +
 +        // COMPAT (akubox): 播放中显示曲目；停止满 CLOCK_RESUME_DELAY_S 秒后才回到时钟。
 +        static NowPlaying np_disp;
@@ -303,9 +346,35 @@
 +        }
 +
 +        if (show_song) {
-+            draw_song_screen(fb, fr, &np_disp);
++            // 黑胶模式：只画圆形旋转封面，不显示歌名（版面全给封面）。
++            // 角度按时间累加，且**只在真正 playing 时累加** —— 暂停/结束立即停转，
++            // 并停在当前角度（不清零），恢复播放就接着转，像被手按住又放开。
++            static double vinyl_angle = 0.0;
++            static double vinyl_last_t = 0.0;
++            double t_now = now_monotonic();
++            if (vinyl_last_t == 0.0) vinyl_last_t = t_now;
++            double dt = t_now - vinyl_last_t;
++            vinyl_last_t = t_now;
++            if (np_disp.playing && dt > 0.0 && dt < 5.0) {   /* dt 上限防进程被挂起后跳一大步 */
++                vinyl_angle += dt * VINYL_DEG_PER_SEC;
++                if (vinyl_angle >= 360.0) {
++                    vinyl_angle -= 360.0 * (double)(int)(vinyl_angle / 360.0);
++                }
++            }
++            int disc_w = 0, disc_h = 0;
++            Image *disc = get_cover(np_disp.artwork_url, &disc_w, &disc_h);
++            draw_vinyl(fb, disc, vinyl_angle);
 +        } else {
-         
++        // COMPAT (akubox): 音量只在时钟页显示，所以这里才查。
++        // get_current_volume_s() 内部是 popen("amixer|grep|awk")——一次调用要 fork 4 个进程；
++        // 它原先在循环顶部每帧都跑（1fps 时 1 次/秒尚可），播放页提到 30fps 后会变成
++        // ~30 次/秒，实测白烧掉 ~60% 单核 CPU。挪进来后只在时钟页每秒执行一次。
+         vol_capacity = get_current_volume_s();
+         snprintf(capacity_str_vol, sizeof(capacity_str_vol), "vol:%d%%", vol_capacity);
+-        
+-        fb_clear_back_buffer(fb, 0, 0, 0); // Clear screen
+-        
++
          // --- Time Drawing Logic ---
 -        int time_base_x = 0;      // Original X position for time
 -        int time_y_coord = -25;   // Original Y position for time
@@ -331,7 +400,8 @@
 +        }
 +        // 由实测关系 可见底 ≈ 131-(y+字号)-1 反解：底边落在可见行 130
 +        int time_y_coord = -time_font_size_val;
-+        unsigned char time_color_r = 0, time_color_g = 253, time_color_b = 118;
++        // 颜色：按需求从原来的绿色 (0,253,118) 改为白色
++        unsigned char time_color_r = 255, time_color_g = 255, time_color_b = 255;
 +        int time_is_chinese = 0;
 +
 +        // 挂上水平压缩矩阵。之后 get_text_width 与 draw_text 都会带上它：
@@ -356,12 +426,12 @@
 +        int width_mm = get_text_width(fr, minute_str, time_font_size_val, time_is_chinese);
 +        int time_base_x = (fb->width - (width_hh + width_colon + width_mm)) / 2;
 +        if (time_base_x < 0) time_base_x = 0;
-+
+ 
+-        // 4. Conditionally draw Colon ":"
 +        // 1. Draw Hour "HH"
 +        draw_text(fb, fr, hour_str, time_base_x, time_y_coord,
 +                  time_color_r, time_color_g, time_color_b, time_font_size_val, time_is_chinese);
- 
--        // 4. Conditionally draw Colon ":"
++
 +        // 2. 冒号（闪烁时也不占位变化，MM 位置稳定）
 +        int current_draw_x = time_base_x + width_hh;
          if (show_colon_for_time) {
@@ -389,7 +459,7 @@
          
          int battery_x = fb->width - 100;
          int battery_y = 30;
-@@ -766,9 +1076,20 @@
+@@ -766,17 +1119,49 @@
          draw_text(fb, fr, capacity_str_vol, 0, battery_y + 65, r_batt, g_batt, b_batt, 11, 0); // Assuming same color for volume
          
          if (strcmp(battery_status, "Charging") == 0 && charging_icon) {
@@ -409,9 +479,32 @@
 +        }  // end clock branch
 +
          fb_update_screen(fb);
-         
-         sleep(1 - (now % 1)); // Approx 1 sec sleep
-@@ -777,6 +1098,7 @@
+-        
+-        sleep(1 - (now % 1)); // Approx 1 sec sleep
++
++        if (show_song) {
++            // 黑胶得转起来才像唱片，按 ~30fps 重绘；时钟页仍按秒刷新，不浪费单核。
++            // 关键：按「绝对时间对齐下一帧」，而不是「渲染完再固定 sleep」——
++            // 后者会把每帧的渲染耗时叠加进帧周期，帧率随负载漂移，转起来一抖一抖。
++            static double next_frame_t = 0.0;
++            double t_after = now_monotonic();
++            if (next_frame_t == 0.0 || next_frame_t < t_after - 1.0) {
++                next_frame_t = t_after;          /* 首次运行 / 落后太多：重新对齐 */
++            }
++            next_frame_t += VINYL_FRAME_S;
++            double wait_s = next_frame_t - t_after;
++            if (wait_s > 0.0) {
++                struct timespec vinyl_delay;
++                vinyl_delay.tv_sec  = (time_t)wait_s;
++                vinyl_delay.tv_nsec = (long)((wait_s - (double)vinyl_delay.tv_sec) * 1000000000.0);
++                nanosleep(&vinyl_delay, NULL);
++            }
++            /* 渲染比目标周期还慢时不额外 sleep：让下一帧立即开始，宁可掉帧不要堆积 */
++        } else {
++            sleep(1 - (now % 1)); // Approx 1 sec sleep
++        }
+     }
+ }
  
  // ... (main function and other functions remain the same) ...
  int main(int argc, char *argv[]) {
