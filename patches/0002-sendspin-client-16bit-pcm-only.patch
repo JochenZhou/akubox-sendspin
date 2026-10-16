@@ -1,0 +1,71 @@
+diff --git a/src/main.cpp b/src/main.cpp
+index ef77200..362136f 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -602,7 +602,12 @@ int main(int argc, char* argv[]) {
+ 
+     // Test common sample rates
+     std::vector<uint32_t> sample_rates = {44100, 48000, 96000, 192000};
+-    std::vector<uint8_t> bit_depths = {16, 24, 32};
++    // COMPAT PATCH (akubox): only advertise 16-bit PCM.
++    // The server picks a bit depth from this list. With 24/32-bit offered it negotiated 32-bit
++    // for sync-group streams, whose chunks are not a whole number of 8-byte frames, so this
++    // build rejected every chunk and the speaker stayed silent. 16-bit PCM is the format this
++    // client is verified to decode, so nothing else is offered.
++    std::vector<uint8_t> bit_depths = {16};
+ 
+     for (uint32_t sample_rate : sample_rates) {
+         for (uint8_t bit_depth : bit_depths) {
+@@ -613,16 +618,11 @@ int main(int argc, char* argv[]) {
+             if (supported) {
+                 fprintf(stderr, "  Device supports: %uHz 2ch %ubit\n", sample_rate, bit_depth);
+ 
+-                // Add FLAC format if supported
+-                player_config.audio_formats.push_back({SendspinCodecFormat::FLAC, 2, sample_rate, bit_depth});
+-
+-                // Add PCM format if supported
++                // COMPAT PATCH (akubox): PCM only, and PCM alone. FLAC is advertised no more
++                // because this build fails every FLAC frame the server sends
++                // (FLAC__ERROR_FRAME_NUMBER), and OPUS is unverified here. Advertising a codec
++                // that cannot be decoded only gives the server a way to pick silence.
+                 player_config.audio_formats.push_back({SendspinCodecFormat::PCM, 2, sample_rate, bit_depth});
+-
+-                // Add OPUS format for common sample rates (OPUS typically uses 48kHz)
+-                if (sample_rate == 48000) {
+-                    player_config.audio_formats.push_back({SendspinCodecFormat::OPUS, 2, sample_rate, 16});
+-                }
+             }
+         }
+     }
+@@ -630,14 +630,28 @@ int main(int argc, char* argv[]) {
+     if (player_config.audio_formats.empty()) {
+         fprintf(stderr, "Warning: No supported formats found for device '%s', using defaults\n",
+                 device_to_check.empty() ? "default" : device_to_check.c_str());
++        // COMPAT PATCH (akubox): same 16-bit PCM policy as the probed path above.
+         player_config.audio_formats = {
+-            {SendspinCodecFormat::FLAC, 2, 44100, 16},
+-            {SendspinCodecFormat::FLAC, 2, 48000, 16},
+-            {SendspinCodecFormat::OPUS, 2, 48000, 16},
+             {SendspinCodecFormat::PCM, 2, 44100, 16},
+             {SendspinCodecFormat::PCM, 2, 48000, 16},
+         };
+     }
++    // COMPAT PATCH (akubox): print what is actually advertised, so the server's codec choice
++    // can be correlated against this list from the client's own startup output.
++    {
++        size_t n_pcm = 0, n_flac = 0, n_opus = 0;
++        for (const auto& fmt : player_config.audio_formats) {
++            if (fmt.codec == SendspinCodecFormat::PCM) {
++                ++n_pcm;
++            } else if (fmt.codec == SendspinCodecFormat::FLAC) {
++                ++n_flac;
++            } else if (fmt.codec == SendspinCodecFormat::OPUS) {
++                ++n_opus;
++            }
++        }
++        fprintf(stderr, "  Advertising   : %zu formats (pcm=%zu flac=%zu opus=%zu)\n",
++                player_config.audio_formats.size(), n_pcm, n_flac, n_opus);
++    }
+     auto& player = client.add_player(std::move(player_config));
+     
+     // Set initial volume and mute to match hardware mixer if using ALSA control

@@ -91,7 +91,7 @@ sudo bash /tmp/akubox-sendspin/install.sh --free-audio-services "linux-voice-ass
 | 4 | `client/state` → `player` 延迟字段名 | `static_delay_ms` | `output_delay_ms`（后续版本改名） | **两个键都写**，旧服务端忽略多余键 |
 | 5 | `client/state` → `player.supported_commands` | **只允许 `set_static_delay`** | `["volume","mute"]` | 改为只发 `set_static_delay` |
 | 6 | `server/command` → `player.command` | 命令名 `set_static_delay`，值在 `static_delay_ms` | 只认 `set_output_delay` / `output_delay_ms` | **两种拼写都接受**（见下） |
-| 7 | 编码偏好顺序 | 取 `supported_formats` 列表中**第一个**匹配项 | FLAC 排在 PCM 前 | **PCM 提前**（见下） |
+| 7 | 宣告的编码与位深 | 从 `supported_formats` 里挑一项（**按流的需求选，不一定取第一个**） | 原本宣告 PCM + FLAC + OPUS × 16/24/32-bit | **只宣告 16-bit PCM**（见下） |
 
 ### 第 6 处：自己宣告的能力，自己解析不了
 
@@ -106,23 +106,43 @@ E sendspin.protocol: Invalid server player command
 
 > 教训：打「兼容旧服务端」的补丁时，要一并处理**旧服务端据此回发**的消息 —— 宣告一个能力就必须能解析对它的调用。
 
-### 第 7 处是最隐蔽的坑
+### 第 7 处是最隐蔽的坑：宣告了做不到的能力
 
-协议层全通、连接 `ESTABLISHED`、日志无任何连接错误，但**喇叭全程无声**：
+`supported_formats` 是我们告诉服务端「我能解什么」。**宣告了却解不了，等于给服务端留了一条通往静音的合法路径。**
+实测撞到两次，症状完全一样：协议层全通、连接 `ESTABLISHED`、没有任何连接错误，但**喇叭全程无声**。
+
+**7a. FLAC 排在 PCM 前**
 
 ```
 >>> Stream started
 E sendspin.decoder: Error decoding FLAC frame: -2     # FLAC__ERROR_FRAME_NUMBER，chunk 全部被丢弃
->>> Stream ended                                       # 流跑完了，但一个字节都没出声
+>>> Stream ended                                       # 流跑完，一个字节都没出声
 ```
 
-根因是 `supported_formats` 是**有序偏好列表**，MA 取第一个匹配的编码；该构建解不开 MA 发来的 FLAC 流。把 PCM 提到最前之后：
+**7b. 宣告了 24/32-bit，服务端在同步组下选了 32-bit**
 
 ```
-I sendspin.sync_task: Processed new codec header: pcm, 44100 Hz, 2 ch, 16-bit
+I sendspin.sync_task: Processed new codec header: pcm, 48000 Hz, 2 ch, 32-bit
+E sendspin.decoder: PCM chunk of 9596 bytes is not whole frames    ← 每个 chunk 都这样，累计 5 万多次
+E sendspin.sync_task: Failed to decode audio chunk
 ```
 
-零错误播完。**所以「MA 显示 playing 但没声音」先查 codec header 行和 decoder 报错，不要先怀疑连接。**
+解码器要求一个 chunk 必须是**整数帧**：32-bit 立体声 = 8 字节/帧，而服务端的分块是 9596 字节，
+`9596 % 8 = 4` → 判定非法直接 `return false`；而调用方是**「全有或全无」**语义（整块音频一起丢弃），
+所以表现不是断续、不是噪声，而是**彻底静默**。任何分块尺寸对不齐的位深（24-bit 同理）都会这样。
+
+**最终处理：只宣告 16-bit PCM。** `16-bit 立体声 = 4 字节/帧`，而服务端的分块尺寸始终是 4 的整数倍
+（实测 4404 与 9596 都是），因此必然对齐；同时不再宣告 FLAC（本构建解不开）与 OPUS（未验证）。
+代价是放弃 24/32-bit —— 对这类小音箱没有实际损失，换来的是「不可能再因编码选择而静音」。
+
+启动日志里加了一行 `Advertising : N formats (pcm=N flac=N opus=N)`，方便把服务端的编码选择与宣告列表对起来。
+
+> **教训：声明能力要保守。** 只宣告已经被验证能解的东西。宣告了做不到的格式，服务端选中它时你只会得到静音，
+> 而日志看起来像解码器故障，很容易把方向查偏。
+>
+> 排查提示：**「MA 显示 playing 但没声音」先看 `codec header` 那行和 decoder 报错，不要先怀疑连接。**
+> 另外「重启客户端后声音回来了」往往只是服务端重新协商到了另一个格式，**那是绕过，不是修复** ——
+> 本文档记录的这一例就是这样：重启让它从 32-bit 换到了 16-bit，问题依旧潜伏。
 
 ## 版本锁定
 
@@ -272,7 +292,7 @@ nmcli con up <连接UUID>
 ├── uninstall.sh                             # 卸载脚本
 ├── patches/
 │   ├── 0001-sendspin-cpp-legacy-ma-compat.patch   # 差异 1-6（Noise / hello / state / server 命令）
-│   └── 0002-sendspin-client-pcm-first.patch       # 差异 7（PCM 优先）
+│   └── 0002-sendspin-client-16bit-pcm-only.patch  # 差异 7（只宣告 16-bit PCM）
 ├── config/sendspin-client.conf.example      # 配置样例
 └── systemd/sendspin-client.service          # systemd 单元参考
 ```

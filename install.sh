@@ -500,7 +500,7 @@ ensure_patches() {
   local tmp; tmp="$(mktemp -d)"
   mkdir -p "${tmp}/patches"
   local f url got
-  for f in 0001-sendspin-cpp-legacy-ma-compat.patch 0002-sendspin-client-pcm-first.patch; do
+  for f in 0001-sendspin-cpp-legacy-ma-compat.patch 0002-sendspin-client-16bit-pcm-only.patch; do
     got=0
     for url in "${RAW_MIRRORS[@]}"; do
       if curl -fsSL --connect-timeout 15 -o "${tmp}/patches/${f}" "${url}/patches/${f}" 2>/dev/null \
@@ -540,8 +540,8 @@ apply_patches() {
       "sendspin-cpp: 6 处 MA 2.10.x 协议兼容（Noise / hello / state / server 命令）"
   fi
   apply_one_patch "$INSTALL_DIR" \
-    "${PATCH_DIR}/0002-sendspin-client-pcm-first.patch" \
-    "sendspin-client: PCM 优先编码（修复 FLAC 解码失败导致无声）"
+    "${PATCH_DIR}/0002-sendspin-client-16bit-pcm-only.patch" \
+    "sendspin-client: 只宣告 16-bit PCM（避免服务端协商到解不了的位深而静音）"
 }
 
 # ---------------------------- 编译 ----------------------------
