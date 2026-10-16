@@ -1,5 +1,5 @@
---- a/showtime.c	2026-10-16 22:36:37.000000000 +0800
-+++ b/showtime.c	2026-10-16 22:36:37.000000000 +0800
+--- a/showtime.c	2026-10-16 22:51:23.000000000 +0800
++++ b/showtime.c	2026-10-16 22:51:23.000000000 +0800
 @@ -12,6 +12,9 @@
  //#include <gif_lib.h>
  #include FT_FREETYPE_H
@@ -10,7 +10,7 @@
  #define VOLUME_MIN 0
  #define VOLUME_MAX 63
  // 帧缓冲结构体
-@@ -669,6 +672,263 @@
+@@ -669,6 +672,260 @@
  
  // (Place get_text_width function here or elsewhere appropriate)
  
@@ -104,13 +104,14 @@
 +// 布局 C：封面 96x96 在 (COVER_X, COVER_Y)
 +// 注意 fb_write_pixel 会做垂直翻转（mirrored_y = height-1-y），所以 y 越大越靠屏幕上方：
 +// 可见行 ≈ 131 - (y + 字号)。下面三个 Y 值是按「可见行」反推的。，歌名 14px 在 y=100，歌手 12px 在 y=116
-+#define COVER_X      33
-+#define COVER_Y      34
-+#define COVER_SIZE   96
-+#define TITLE_Y      4
-+#define TITLE_SIZE   14
-+#define ARTIST_Y     -8
-+#define ARTIST_SIZE  12
++// 版面（按可见行，从屏幕顶算；fb_write_pixel 会做垂直翻转，换算见上）：
++//   封面 120x120   x 21..140    可见 y 0..119
++//   歌名 12px                   可见 y ~118..130（只一行；封面底边压在歌名上沿 2 行，文字后画覆盖之）
++#define COVER_X      21
++#define COVER_Y      12
++#define COVER_SIZE   120
++#define TITLE_Y      (-11)
++#define TITLE_SIZE   12
 +
 +// ==================== 专辑封面（步骤 2） ====================
 +#define COVER_CACHE_DIR "/tmp/showtime-cover-cache"
@@ -264,17 +265,13 @@
 +        int w = get_text_width(fr, unknown, TITLE_SIZE, 1);
 +        draw_text(fb, fr, unknown, (fb->width - w) / 2, TITLE_Y, 130, 130, 130, TITLE_SIZE, 1);
 +    }
-+    if (np->artist[0] != '\0') {
-+        truncate_to_width(fr, np->artist, tmp, sizeof(tmp), ARTIST_SIZE, 1, fb->width);
-+        int w = get_text_width(fr, tmp, ARTIST_SIZE, 1);
-+        draw_text(fb, fr, tmp, (fb->width - w) / 2, ARTIST_Y, 150, 150, 150, ARTIST_SIZE, 1);
-+    }
++    // 只显示一行歌名，不再画歌手（版面让给封面）
 +}
 +
  // 显示时间和电池状态
  void show_time_and_battery(FrameBuffer *fb, FontRenderer *fr, Image *charging_icon, Image *battery_icon) {
      time_t now;
-@@ -713,6 +973,33 @@
+@@ -713,42 +970,76 @@
          snprintf(capacity_str_vol, sizeof(capacity_str_vol), "vol:%d%%", vol_capacity);
          
          fb_clear_back_buffer(fb, 0, 0, 0); // Clear screen
@@ -307,8 +304,73 @@
 +        } else {
          
          // --- Time Drawing Logic ---
-         int time_base_x = 0;      // Original X position for time
-@@ -769,6 +1056,8 @@
+-        int time_base_x = 0;      // Original X position for time
+-        int time_y_coord = -25;   // Original Y position for time
+-        int time_font_size_val = 46; // Original font size for time
+-        unsigned char time_color_r = 0, time_color_g = 253, time_color_b = 118; // Original time color
+-        int time_is_chinese = 0;  // Time (digits, colon) is not Chinese
++        // COMPAT (akubox): 日期与星期已移除，时间字号取「能塞进屏宽的最大值」并水平居中。
++        // 字号只依赖字体，与时:分无关，所以算一次缓存下来（用 00:00 作最宽情形）。
++        static int time_font_size_val = 0;
++        if (time_font_size_val == 0) {
++            int max_w = fb->width - 6;
++            for (int s = 108; s >= 20; s--) {
++                int w = get_text_width(fr, "00:00", s, 0);
++                if (w > 0 && w <= max_w) { time_font_size_val = s; break; }
++            }
++            if (time_font_size_val == 0) time_font_size_val = 46;
++            fprintf(stderr, "时间字号: %d\n", time_font_size_val);
++        }
++        // 竖直居中于顶部状态行以下：由实测关系 可见中心 ≈ 130 - y - 1.45*字号 反解 y
++        int time_y_coord = 130 - (time_font_size_val * 145 / 100) - 84;
++        unsigned char time_color_r = 0, time_color_g = 253, time_color_b = 118;
++        int time_is_chinese = 0;
+ 
+-        // 1. Draw Hour "HH"
+-        draw_text(fb, fr, hour_str, time_base_x, time_y_coord, 
+-                  time_color_r, time_color_g, time_color_b, time_font_size_val, time_is_chinese);
+-        
+-        // 2. Calculate width of "HH" to position the colon
+         int width_hh = get_text_width(fr, hour_str, time_font_size_val, time_is_chinese);
+-        int current_draw_x = time_base_x + width_hh;
+-
+-        // 3. Calculate width of colon (needed whether it's drawn or not to keep "MM" stable)
+         int width_colon = get_text_width(fr, colon_str, time_font_size_val, time_is_chinese);
++        int width_mm = get_text_width(fr, minute_str, time_font_size_val, time_is_chinese);
++        int time_base_x = (fb->width - (width_hh + width_colon + width_mm)) / 2;
++        if (time_base_x < 0) time_base_x = 0;
+ 
+-        // 4. Conditionally draw Colon ":"
++        // 1. Draw Hour "HH"
++        draw_text(fb, fr, hour_str, time_base_x, time_y_coord,
++                  time_color_r, time_color_g, time_color_b, time_font_size_val, time_is_chinese);
++
++        // 2. 冒号（闪烁时也不占位变化，MM 位置稳定）
++        int current_draw_x = time_base_x + width_hh;
+         if (show_colon_for_time) {
+-            draw_text(fb, fr, colon_str, current_draw_x, time_y_coord, 
++            draw_text(fb, fr, colon_str, current_draw_x, time_y_coord,
+                       time_color_r, time_color_g, time_color_b, time_font_size_val, time_is_chinese);
+         }
+-        // Whether drawn or not, advance pen position by the colon's width
+         current_draw_x += width_colon;
+ 
+-        // 5. Draw Minute "MM"
+-        draw_text(fb, fr, minute_str, current_draw_x, time_y_coord, 
++        // 3. Draw Minute "MM"
++        draw_text(fb, fr, minute_str, current_draw_x, time_y_coord,
+                   time_color_r, time_color_g, time_color_b, time_font_size_val, time_is_chinese);
+         // --- End of Time Drawing Logic ---
+ 
+-        // 绘制日期 (original position)
+-        draw_text(fb, fr, date_str, 0, 68, 255, 255, 255, 12, 0);
+-        // 绘制中文星期 (original position)
+-        draw_text(fb, fr, weekday_str, 125, 72, 255, 255, 255, 9, 1); // 1 for is_chinese
++        // COMPAT (akubox): 日期与星期已按需求移除，版面全部让给时间
+         
+         int battery_x = fb->width - 100;
+         int battery_y = 30;
+@@ -769,6 +1060,8 @@
              draw_image(fb, charging_icon, 70, battery_y + 65);
          }
          
@@ -317,7 +379,7 @@
          fb_update_screen(fb);
          
          sleep(1 - (now % 1)); // Approx 1 sec sleep
-@@ -777,6 +1066,7 @@
+@@ -777,6 +1070,7 @@
  
  // ... (main function and other functions remain the same) ...
  int main(int argc, char *argv[]) {

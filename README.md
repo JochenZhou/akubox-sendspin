@@ -241,7 +241,7 @@ if (config_parser.has_key("FRIENDLY_NAME")) {
 ## 屏幕显示曲目（可选）
 
 AkuBox 有一块 162×132 的 SPI 小屏，默认只显示时钟。加上屏幕补丁后：**播放时显示专辑封面 +
-歌名 + 歌手，停止播放 5 秒后自动回到时钟**。
+歌名，停止播放 5 秒后自动回到时钟**；时钟页去掉日期与星期，把时间放大到屏宽允许的最大字号。
 
 ```bash
 # 装播放器时一并装上
@@ -257,7 +257,7 @@ sudo bash showtime/install-showtime-nowplaying.sh
 
 封面走 MA 的 imageproxy，统一请求 `size=160&fmt=png`（**该接口只接受 80/160/256/512**，
 且本机链接的是 libpng 而非 libjpeg），下载后按 URL 哈希缓存在
-`/tmp/showtime-cover-cache/`，等比缩放到 96×96 内显示；失败则降级为纯文字。
+`/tmp/showtime-cover-cache/`，等比缩放到 120×120 内显示；失败则降级为纯文字。
 
 详见 [`showtime/README.md`](showtime/README.md)。
 
