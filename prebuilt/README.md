@@ -11,7 +11,7 @@ prebuilt/
 有这些文件时，一键脚本**默认就用它们**，全程不需要编译：
 
 ```bash
-git clone https://github.com/JochenZhou/akubox-sendspin.git /tmp/akubox-sendspin
+git clone https://github.com/JochenZhou/akubox-sendspin.git /tmp/akubox-sendspin && \
 sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
 ```
 

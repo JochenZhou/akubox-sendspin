@@ -9,15 +9,13 @@
 
 ## 一、先看效果
 
-**播放时 —— 专辑封面像黑胶一样转**
+| 播放时 · 专辑封面像黑胶一样转 | 停止 5 秒后 · 回到时钟 |
+|:---:|:---:|
+| <img src="showtime/screenshots/player-vinyl.png" width="380" alt="黑胶播放页"> | <img src="showtime/screenshots/clock.png" width="380" alt="时钟页"> |
 
-![黑胶播放页](showtime/screenshots/player-vinyl.png)
+<sub>两张都是真机 `/dev/fb0` 抓帧（6 倍最近邻放大），不是效果图。</sub>
 
-**停止 5 秒后 —— 回到时钟，时间白色大字、无日期无星期**
-
-![时钟页](showtime/screenshots/clock.png)
-
-两张都是真机 `/dev/fb0` 抓帧、6 倍最近邻放大，不是效果图。
+除了画面，你还会得到：
 
 | 屏幕这块 | 你会得到 |
 |---|---|
@@ -43,24 +41,18 @@
 
 ---
 
-## 三、快速开始（三步）
+## 三、快速开始（两步）
 
-### 第 1 步：把仓库放到设备上
-
-```bash
-git clone https://github.com/JochenZhou/akubox-sendspin.git /tmp/akubox-sendspin
-```
-
-> GitHub 慢的话，可以先在你自己电脑上 clone 再用 `scp -r` 传过去；脚本只依赖这个目录本身。
-
-### 第 2 步：跑一键安装
+### 第 1 步：一条命令装好
 
 ```bash
+git clone https://github.com/JochenZhou/akubox-sendspin.git /tmp/akubox-sendspin && \
 sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
 ```
 
-`--name` 是设备名（会显示在 MA 与 Home Assistant 里，**多台设备务必取不同名字**）。
-不加 `-y` 会进入交互向导，逐步让你确认。
+`--name` 是设备名（会显示在 MA 与 Home Assistant 里，**多台设备务必取不同名字**）；
+不加 `-y` 会进入交互向导，逐步让你确认。GitHub 慢的话，可以先在自己电脑上 clone 再
+`scp -r` 传过去 —— 脚本只依赖这个目录本身。
 
 **这一条命令做了四件事**：
 
@@ -78,7 +70,7 @@ sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
     屏幕界面: enabled / active
 ```
 
-### 第 3 步：在 Music Assistant 里添加
+### 第 2 步：在 Music Assistant 里添加
 
 1. 打开 MA → **设置 → 提供商 → Sendspin**
 2. 打开该提供商页面（或重启一次 MA 附加组件），MA 会扫描局域网
