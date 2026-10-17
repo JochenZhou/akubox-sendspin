@@ -58,6 +58,15 @@ SKIP_LEGACY_PATCH=0
 WITH_DISPLAY=1          # 默认顺带装屏幕界面（黑胶播放页 + 时钟页）；--no-display 可跳过
 NO_POWERSAVE=0          # 默认关闭 WiFi 省电；--no-powersave 可跳过
 DISPLAY_BIN=""          # --display-bin: 直接用预编译 showtime 二进制（无需源码/编译）
+CLIENT_BIN=""           # --client-bin: 直接用预编译 sendspin-client（跳过 clone/补丁/编译）
+CLIENT_BIN_FILE=""      # 校验通过后的实际文件（本地路径或下载到临时文件）
+# 预编译产物目录（脚本同级 prebuilt/；用 curl | bash 方式运行时为空，不会命中）
+SELF_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+PREBUILT_DIR="${SELF_DIR}/prebuilt"
+PREBUILT_CLIENT_DEFAULT="${PREBUILT_DIR}/sendspin-client.armv7"
 FREE_AUDIO=0
 FREE_AUDIO_EXPLICIT=0
 ASSUME_YES=0
@@ -126,6 +135,11 @@ AkuBox Sendspin Client 安装脚本
                          直接用预编译好的 showtime 二进制安装屏幕界面：
                          跳过打补丁与编译，不需要厂商源码，约 5 秒完成。
                          也可把二进制放到 showtime/prebuilt/showtime.armv7 自动使用。
+  --client-bin <路径|URL>
+                         直接用预编译好的 sendspin-client（含 7 处兼容补丁）：
+                         跳过 clone / 打补丁 / 编译，30-40 分钟的编译变成几秒。
+                         也可把二进制放到 prebuilt/sendspin-client.armv7 自动使用。
+                         要求同型号 + 同发行版（glibc/GLIBCXX 一致），脚本会校验。
   --no-powersave         不关闭 WiFi 省电
                          （默认会关闭，见下方「为什么要关 WiFi 省电」）
   --skip-legacy-ma-patch 不应用 MA 2.10.x 兼容补丁（仅当 MA >= 2.11 / aiosendspin 10.x）
@@ -166,6 +180,7 @@ while [ $# -gt 0 ]; do
     --with-display)        WITH_DISPLAY=1; shift ;;
     --no-display)          WITH_DISPLAY=0; shift ;;
     --display-bin)         DISPLAY_BIN="${2:?--display-bin 需要路径或 URL}"; shift 2 ;;
+    --client-bin)          CLIENT_BIN="${2:?--client-bin 需要路径或 URL}"; shift 2 ;;
     --no-powersave)        NO_POWERSAVE=1; shift ;;
     --skip-legacy-ma-patch) SKIP_LEGACY_PATCH=1; shift ;;
     --free-audio)          FREE_AUDIO=1; shift ;;
@@ -721,12 +736,75 @@ build_client() {
   ok "动态库依赖完整"
 }
 
+# ---------------------------- 预编译客户端（跳过 clone / 打补丁 / 编译） ----------------------------
+# 同型号 + 同发行版设备的产物可以复用：真机实测两台 AKU R8-AkuBox 各自编译的
+# sendspin-client 大小同为 1161764 字节，**只差 27 字节**，且全部落在 ELF BuildID
+# note 区（f6dfafb8… vs fc5b936a…），代码区逐字节一致 → 功能上就是同一个程序。
+#
+# 注意：**上游官方 armhf 发布包不能用** —— 它们要求 glibc 2.38 / GLIBCXX 3.4.32，
+# 本机 Ubuntu 22.04（glibc 2.35）跑不起来。这里要的是在同类设备上**自己编译**
+# 且打过兼容补丁的产物。
+prepare_client_bin() {
+  local src="$1" f
+  hr; log "使用预编译客户端（跳过 clone / 打补丁 / 编译）"
+  case "$src" in
+    http://*|https://*)
+      f="$(mktemp /tmp/sendspin-client.XXXXXX)"
+      log "  下载: ${src}"
+      if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 20 -o "$f" "$src" || die "下载失败: ${src}"
+      elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 20 -O "$f" "$src" || die "下载失败: ${src}"
+      else
+        die "缺少 curl / wget，无法下载"
+      fi
+      ;;
+    *)
+      [ -f "$src" ] || die "找不到二进制: ${src}"
+      f="$(mktemp /tmp/sendspin-client.XXXXXX)"
+      cp -a "$src" "$f"
+      ;;
+  esac
+  [ -s "$f" ] || die "二进制为空: ${src}"
+  chmod 0755 "$f"
+
+  if command -v file >/dev/null 2>&1; then
+    file "$f" | grep -qiE 'ELF 32-bit.*ARM' || die "不是 32 位 ARM ELF：$(file -b "$f")"
+  fi
+  ok "架构校验通过"
+
+  local missing
+  missing="$(ldd "$f" 2>/dev/null | grep 'not found' || true)"
+  if [ -n "$missing" ]; then
+    printf '%s\n' "$missing" | sed 's/^/    /'
+    die "缺少运行时库（发行版/glibc 不匹配？）—— 请改用源码编译，不要跨发行版复用二进制"
+  fi
+  ok "运行时依赖完整"
+
+  # 必须是打过兼容补丁的构建，否则连 MA 2.10 会握手失败或出更隐蔽的问题
+  local s lack=()
+  s="$(strings "$f" 2>/dev/null || true)"
+  printf '%s' "$s" | grep -qF '(legacy server); trying all'      || lack+=("0001 协议兼容")
+  printf '%s' "$s" | grep -qF 'Advertising   : %zu formats'      || lack+=("0002 只宣告 16-bit PCM")
+  printf '%s' "$s" | grep -qF '/nowplaying'                       || lack+=("0003 曲目落盘")
+  if [ "${#lack[@]}" -gt 0 ]; then
+    warn "这个二进制缺少补丁标记: ${lack[*]}"
+    warn "多半是未打补丁的构建 —— 连 MA 2.10 会握手失败或静默无声。"
+    die "拒绝安装未打补丁的预编译二进制（请用源码编译，或换一个打过补丁的产物）"
+  fi
+  ok "补丁标记齐全（0001 / 0002 / 0003）"
+
+  CLIENT_BIN_FILE="$f"
+  ok "使用: $(md5sum "$f" | cut -c1-12) / $(stat -c%s "$f") 字节"
+}
+
 # ---------------------------- 安装 ----------------------------
 install_client() {
   hr; log "安装到系统"
 
-  install -m0755 "${INSTALL_DIR}/build/sendspin-client" "$BIN_PATH"
-  ok "二进制: ${BIN_PATH}"
+  local bin_src="${CLIENT_BIN_FILE:-${INSTALL_DIR}/build/sendspin-client}"
+  install -m0755 "$bin_src" "$BIN_PATH"
+  ok "二进制: ${BIN_PATH}（$(md5sum "$BIN_PATH" | cut -c1-12)）"
 
   if ! id "$RUN_USER" >/dev/null 2>&1; then
     useradd --system --create-home --home-dir "$STATE_DIR" \
@@ -889,11 +967,23 @@ main() {
   install_deps
   resolve_audio
   audio_conflicts_step
-  fetch_sources
-  apply_patches
-  # 放在所有需要联网的步骤之后（会重连 WiFi），编译阶段不需要网络，正好错开
-  fix_wifi_powersave
-  build_client
+
+  # ---- 客户端来源：预编译优先（--client-bin 指定，或 prebuilt/ 命中）----
+  local use_bin=0
+  if [ -z "$CLIENT_BIN" ] && [ -n "$PREBUILT_DIR" ] && [ -f "$PREBUILT_CLIENT_DEFAULT" ]; then
+    CLIENT_BIN="$PREBUILT_CLIENT_DEFAULT"
+    log "发现预编译客户端: ${PREBUILT_CLIENT_DEFAULT}"
+    log "  （想改为源码编译：删掉该文件，或加 --build-only）"
+  fi
+  if [ -n "$CLIENT_BIN" ]; then
+    [ "$BUILD_ONLY" -eq 1 ] && die "--build-only 与 --client-bin 冲突：预编译模式不编译"
+    use_bin=1
+    prepare_client_bin "$CLIENT_BIN"
+  else
+    fetch_sources
+    apply_patches
+    build_client
+  fi
 
   if [ "$BUILD_ONLY" -eq 1 ]; then
     hr; ok "仅编译模式完成，未修改系统"
@@ -901,6 +991,8 @@ main() {
     exit 0
   fi
 
+  # 放在所有需要联网的步骤之后（会重连 WiFi）；安装阶段不需要网络
+  fix_wifi_powersave
   install_client
   if [ "$WITH_DISPLAY" -eq 1 ]; then
     install_display

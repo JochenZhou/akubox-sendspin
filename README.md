@@ -32,8 +32,37 @@ sudo bash /tmp/akubox-sendspin/install.sh
 | 用法 | 效果 |
 |---|---|
 | `install.sh`（默认） | 播放器 + 关闭 WiFi 省电 + 黑胶屏幕界面 |
+| `install.sh --client-bin <路径\|URL>` | **跳过 clone/补丁/编译**，直接用预编译客户端（30-40 分钟 → 约 1 分钟） |
+| `install.sh --display-bin <路径\|URL>` | 屏幕界面用预编译二进制（不需要厂商源码） |
 | `install.sh --no-display` | 只装播放器，不动屏幕 |
 | `install.sh --no-powersave` | 不关闭 WiFi 省电 |
+
+### 用预编译二进制（可选，快很多）
+
+播放器本身的编译在单核 ARM 上要 **30-40 分钟**。同型号 + 同发行版的设备可以直接复用产物：
+
+```bash
+# 从另一台同型号设备取编译好的客户端
+scp root@<另一台>:/usr/bin/sendspin-client /tmp/sendspin-client.armv7
+sudo bash install.sh --client-bin /tmp/sendspin-client.armv7 --name "客厅 AkuBox" -y
+```
+
+也可以把文件放到仓库根的 `prebuilt/sendspin-client.armv7`，脚本会自动发现并使用
+（详见 [prebuilt/README.md](prebuilt/README.md)）。
+
+**为什么可以复用**：两台 `AKU R8-AkuBox`（同为 Ubuntu 22.04 armhf）各自编译的产物
+大小同为 1161764 字节，**只差 27 字节，且全部落在 ELF BuildID note 区**
+（`f6dfafb8…` vs `fc5b936a…`）—— 代码区逐字节一致，功能上就是同一个程序。
+
+**什么情况下不能用**：
+
+- ❌ **上游官方 armhf 发布包**：要求 glibc 2.38 / GLIBCXX 3.4.32，Ubuntu 22.04（glibc 2.35）跑不起来
+- ❌ 不同型号 / 不同发行版 / 不同 glibc
+- ❌ 未打兼容补丁的构建
+
+脚本会依次校验：`ELF 32-bit ARM` → `ldd` 无缺失 → **三个补丁标记齐全**
+（`(legacy server); trying all` / `Advertising   : %zu formats` / `/nowplaying`），
+任一不过直接拒绝安装，不会把不兼容的二进制刷上去。
 
 ### 为什么要关 WiFi 省电
 
@@ -392,6 +421,8 @@ nmcli con up <连接UUID>
 │   ├── 0001-sendspin-cpp-legacy-ma-compat.patch   # 差异 1-6（Noise / hello / state / server 命令）
 │   ├── 0002-sendspin-client-16bit-pcm-only.patch  # 差异 7（只宣告 16-bit PCM）
 │   └── 0003-sendspin-client-nowplaying-bridge.patch # 曲目信息落盘（供屏幕显示）
+├── prebuilt/                                # 预编译播放器放这里（默认空，自备）
+│   └── README.md
 ├── showtime/                                # 屏幕界面：黑胶播放页 + 时钟页（可选）
 │   ├── README.md
 │   ├── install-showtime-nowplaying.sh
