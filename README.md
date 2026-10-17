@@ -27,6 +27,28 @@ git clone https://github.com/JochenZhou/akubox-sendspin.git /tmp/akubox-sendspin
 sudo bash /tmp/akubox-sendspin/install.sh
 ```
 
+**一条命令做四件事**：装播放器 → 关闭 WiFi 省电 → 装屏幕界面（黑胶播放页 + 时钟页）→ 启动并自检。
+
+| 用法 | 效果 |
+|---|---|
+| `install.sh`（默认） | 播放器 + 关闭 WiFi 省电 + 黑胶屏幕界面 |
+| `install.sh --no-display` | 只装播放器，不动屏幕 |
+| `install.sh --no-powersave` | 不关闭 WiFi 省电 |
+
+### 为什么要关 WiFi 省电
+
+AkuBox 是纯 WiFi 设备。这颗 `brcmfmac` 网卡开着省电时会出现**间歇性「失联」**：
+
+- 设备自己能上网（能 clone GitHub、能推流播放）
+- 但局域网里别人 **ping 不通、SSH 连不上、MA 也发现不到它**
+- PVE 上 `tcpdump -i vmbr0 -n -e arp` 能看到 `who-has <设备IP>` 请求发出，**零应答**（不回 ARP）
+
+把该连接的 `802-11-wireless.powersave` 设为 `2 (disable)` 后，从有线主机
+（容器 / PVE）与同为 WiFi 客户端的主机实测**全部可达**。
+
+脚本会自动识别当前是否为 WiFi 连接（有线则跳过），写入设置并重连一次以生效。（会短暂断网，
+所以这一步放在所有需要联网的步骤之后、编译之前执行。）
+
 ### 交互式向导
 
 不带参数直接运行时，脚本会引导你完成这几步：
@@ -47,10 +69,26 @@ sudo bash /tmp/akubox-sendspin/install.sh
     PID 6965    sendspin-client         ← 本播放器自身（正常）
 [*] 系统上存在以下可能争用声卡的服务:
     linux-voice-assistant.service      disabled
-    showtime.service                   enabled / active
     akuapp.service                     disabled
   是否停止并禁用以上服务以释放声卡? [y/N]
+
+[*] 关闭 WiFi 省电（避免设备间歇性不回 ARP、MA 发现不到）
+    接口: wlan0  SSID: xxxx
+[✓] 已设为 powersave=2(disable)
+
+[*] 编译（单核 ARM 约需 30-40 分钟）
+[*] mDNS（avahi）就绪检查
+[✓] avahi 已就绪（客户端可正常注册服务）
+[✓] 服务已启动: sendspin-client
+[✓] mDNS 已广播「客厅 AkuBox」
+[*] 安装屏幕界面（黑胶播放页 + 时钟页）
+[✓] 屏幕界面已安装
+[✓] 屏幕服务 showtime: enabled / active
 ```
+
+**`showtime` 不在声卡争用名单里**：它只写 `/dev/fb0`、从不打开 `/dev/snd/*`。之前把它列进去，
+导致安装时被误停用禁用、屏幕直接不亮（真机上踩过）。屏幕界面是默认安装项，装完会自动
+`enable --now showtime`。
 
 **服务清单是动态探测的**：脚本只在系统上**确实存在**该单元时才列出它。"不是每台 AkuBox 都装了
 `linux-voice-assistant`" —— 没装就完全不会出现，也不会因为脚本写死了名字而误报或误操作。
@@ -255,12 +293,21 @@ AkuBox 有一块 162×132 的 SPI 小屏，默认只显示时钟。加上屏幕�
   颜色**白色**；日期与星期已移除；顶部保留 `vol:NN%` / 充电图标 / 电量。
 
 ```bash
-# 装播放器时一并装上
-sudo bash install.sh --with-display
+# 默认就装屏幕界面；只装播放器用 --no-display
+sudo bash install.sh
 
-# 或者播放器已装好，单独装屏幕部分
+# 播放器已装好，也可单独装/更新屏幕部分
 sudo bash showtime/install-showtime-nowplaying.sh
 ```
+
+> **注意**：屏幕改造需要厂商源码 `/opt/aku/showtime/showtime.c`。部分固件批次只发编译好的
+> 二进制（例如 MQTT 版，没有消息时屏幕全黑、也不带源码）。这种设备上脚本会给出提示并跳过；
+> 从同型号设备复制源码后重跑即可：
+>
+> ```bash
+> scp root@<另一台 AkuBox>:/opt/aku/showtime/showtime.c.pre-nowplaying /opt/aku/showtime/showtime.c
+> sudo bash /tmp/akubox-sendspin/showtime/install-showtime-nowplaying.sh
+> ```
 
 实现方式与 MQTT / HA 自动化无关 —— sendspin 协议本身就把元数据送到了设备，客户端补丁 `0003`
 把 `title / artist / album / artwork_url` 写成一个 `key=value` 小文件

@@ -55,7 +55,8 @@ RUN_USER="sendspin"
 JOBS=1
 BUILD_ONLY=0
 SKIP_LEGACY_PATCH=0
-WITH_DISPLAY=0
+WITH_DISPLAY=1          # 默认顺带装屏幕界面（黑胶播放页 + 时钟页）；--no-display 可跳过
+NO_POWERSAVE=0          # 默认关闭 WiFi 省电；--no-powersave 可跳过
 FREE_AUDIO=0
 FREE_AUDIO_EXPLICIT=0
 ASSUME_YES=0
@@ -63,7 +64,9 @@ PATCH_DIR=""
 
 # 可能与播放器争用声卡的厂商服务（仅供探测的候选名单）。
 # 并非每台 AkuBox 都装了这些，实际以系统上「存在」的为准，不存在就完全不会出现。
-AUDIO_CONFLICT_CANDIDATES=(linux-voice-assistant showtime akuapp voice-assistant aku-voice)
+# 注意：showtime 只写 /dev/fb0，从不打开 /dev/snd/*，不应出现在这里 ——
+# 列进去会让安装时误把它停用禁用，屏幕直接不亮（真机上踩过）。
+AUDIO_CONFLICT_CANDIDATES=(linux-voice-assistant akuapp voice-assistant aku-voice)
 # 探测结果（运行时填充）
 AUDIO_HOLDER_PIDS=()
 AUDIO_HOLDER_UNITS=()
@@ -116,8 +119,10 @@ AkuBox Sendspin Client 安装脚本
   --jobs <N>             编译并行度（默认: ${JOBS}；AkuBox 单核建议 1）
   --patch-dir <路径>     指定补丁目录（默认: 脚本同级 patches/，否则自动下载）
   --build-only           只克隆+打补丁+编译，不安装、不写 systemd
-  --with-display         同时给设备屏幕程序（showtime）加"正在播放"界面
-                         （封面 + 歌名 + 歌手；仅当本机有 /opt/aku/showtime 时生效）
+  --with-display         安装屏幕界面（黑胶播放页 + 时钟页）—— 现在是默认行为
+  --no-display           不装屏幕界面，只装播放器
+  --no-powersave         不关闭 WiFi 省电
+                         （默认会关闭，见下方「为什么要关 WiFi 省电」）
   --skip-legacy-ma-patch 不应用 MA 2.10.x 兼容补丁（仅当 MA >= 2.11 / aiosendspin 10.x）
   --free-audio           停止并禁用探测到的声卡争用服务（非交互时仍需 -y 才不再询问）
   --free-audio-services <列表>
@@ -126,6 +131,12 @@ AkuBox Sendspin Client 安装脚本
                          --free-audio-services "linux-voice-assistant"
   -y, --yes              全自动：不改名、不询问、按参数执行
   -h, --help             显示本帮助
+
+为什么要关 WiFi 省电（默认会做）:
+  AkuBox 是纯 WiFi 设备。这颗 brcmfmac 网卡开着省电时，会出现「设备自己能上网，
+  但局域网里别人 ping 不通、SSH 连不上、MA 也发现不到」的间歇性故障 ——
+  抓包能看到 who-has 请求发出却零应答（ARP 不回）。把 powersave 设成 2(disable)
+  后实测从多台主机均可达。脚本会对当前 WiFi 连接写入该设置并重连一次。
 
 探测的候选服务: ${AUDIO_CONFLICT_CANDIDATES[*]}
 （仅当系统上确实存在该服务时才会出现在列表中）
@@ -148,6 +159,8 @@ while [ $# -gt 0 ]; do
     --patch-dir)           PATCH_DIR="${2:?--patch-dir 需要参数}"; shift 2 ;;
     --build-only)          BUILD_ONLY=1; shift ;;
     --with-display)        WITH_DISPLAY=1; shift ;;
+    --no-display)          WITH_DISPLAY=0; shift ;;
+    --no-powersave)        NO_POWERSAVE=1; shift ;;
     --skip-legacy-ma-patch) SKIP_LEGACY_PATCH=1; shift ;;
     --free-audio)          FREE_AUDIO=1; shift ;;
     --free-audio-services)
@@ -220,7 +233,8 @@ install_deps() {
   export DEBIAN_FRONTEND=noninteractive
   # alsa-utils(aplay/amixer) 与 psmisc(fuser) 用于声卡探测，必须显式依赖
   local pkgs=(git cmake pkg-config build-essential libasound2-dev
-              libavahi-compat-libdnssd-dev avahi-daemon alsa-utils psmisc)
+              libavahi-compat-libdnssd-dev avahi-daemon avahi-utils iw
+              alsa-utils psmisc)
   local missing=()
   local p
   for p in "${pkgs[@]}"; do
@@ -302,6 +316,128 @@ resolve_audio() {
   if printf '%s' "$cards" | grep -q '^card'; then
     ok "声卡列表:"
     printf '%s\n' "$cards" | sed -n 's/^\(card [0-9]*:.*\)/    \1/p'
+  fi
+}
+
+# ---------------------------- WiFi 省电（AkuBox 是纯 WiFi 设备） ----------------------------
+# 真机判据：省电开着时，设备自己能上网（能 clone GitHub），但局域网内其它主机
+# ping/SSH/MA 全部连不上；抓包是 who-has 请求发出、零应答（不回 ARP）。
+# 把 powersave 设为 2(disable) 后，从有线主机与同为 WiFi 客户端的主机均可达。
+wifi_iface() {
+  local ifc
+  ifc="$(ip route show default 2>/dev/null | awk '/^default/ {print $5; exit}')"
+  [ -n "$ifc" ] || return 1
+  [ -d "/sys/class/net/${ifc}/wireless" ] || return 1   # 有线连接不必处理
+  printf '%s' "$ifc"
+}
+
+nm_active_uuid_for() {
+  local dev="$1"
+  nmcli -t -f UUID,DEVICE con show --active 2>/dev/null | awk -F: -v d="$dev" '$2==d {print $1; exit}'
+}
+
+fix_wifi_powersave() {
+  hr; log "关闭 WiFi 省电（避免设备间歇性不回 ARP、MA 发现不到）"
+  if [ "${NO_POWERSAVE:-0}" -eq 1 ]; then
+    log "已指定 --no-powersave，跳过"
+    return 0
+  fi
+  local ifc
+  if ! ifc="$(wifi_iface)"; then
+    ok "当前是有线连接，无需处理"
+    return 0
+  fi
+  local ssid
+  ssid="$(iw dev "$ifc" link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p' | head -1)"
+  [ -n "$ssid" ] || ssid="$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | awk -F: -v d="$ifc" '$2==d {print $1; exit}')"
+  log "  接口: ${ifc}  SSID: ${ssid:-未知}"
+
+  if command -v nmcli >/dev/null 2>&1; then
+    local uuid cur
+    uuid="$(nm_active_uuid_for "$ifc")"
+    if [ -n "$uuid" ]; then
+      cur="$(nmcli -f 802-11-wireless.powersave con show "$uuid" 2>/dev/null | awk '{print $2}' | tail -1)"
+      if [ "$cur" = "2" ]; then
+        ok "已是 powersave=2(disable)，无需改动"
+      else
+        log "  当前 powersave=${cur:-unknown} → 设为 2(disable) 并重连（会短暂断网）"
+        nmcli con mod "$uuid" 802-11-wireless.powersave 2 >/dev/null 2>&1 \
+          || warn "写入 powersave 失败（该连接可能由其它组件托管）"
+        nmcli con up "$uuid" >/dev/null 2>&1 || warn "重连失败，请检查 WiFi 状态"
+        sleep 4
+        cur="$(nmcli -f 802-11-wireless.powersave con show "$uuid" 2>/dev/null | awk '{print $2}' | tail -1)"
+        if [ "$cur" = "2" ]; then ok "已设为 powersave=2(disable)"; else warn "设置后读到 powersave=${cur:-unknown}"; fi
+      fi
+      log "  IP: $(ip -4 -br addr show "$ifc" 2>/dev/null | awk '{print $3}')"
+      return 0
+    fi
+    warn "未找到 ${ifc} 的 NetworkManager 活动连接，改用运行时设置"
+  fi
+
+  if command -v iw >/dev/null 2>&1; then
+    if iw dev "$ifc" set power_save off >/dev/null 2>&1; then
+      ok "已在运行时关闭省电（重启后可能恢复，建议交给 NetworkManager 管理）"
+    else
+      warn "iw set power_save off 失败"
+    fi
+  else
+    warn "缺少 nmcli / iw，无法关闭 WiFi 省电"
+  fi
+}
+
+# ---------------------------- mDNS 就绪与注册自检 ----------------------------
+# 踩过的坑：systemctl restart avahi-daemon sendspin-client 同时重启两者时，
+# 客户端抢在 avahi 就绪前注册，Bonjour 兼容层**不报错**、日志也看不出来，
+# 结果是主机名能解析、服务却不出现在 browse 里，MA 永远发现不到设备。
+# 对策：等 avahi 真就绪再启动客户端；万一没注册上，只重启客户端（绝不连 avahi 一起）。
+ensure_avahi_ready() {
+  hr; log "mDNS（avahi）就绪检查"
+  if ! systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+    if systemctl cat avahi-daemon.service >/dev/null 2>&1; then
+      log "  avahi-daemon 未运行，尝试启动"
+      systemctl enable --now avahi-daemon >/dev/null 2>&1 || true
+    fi
+  fi
+  if ! systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+    warn "avahi-daemon 不可用 —— MA 靠 mDNS 发现设备，缺少它设备不会出现在 MA 里"
+    return 0
+  fi
+  local i
+  for i in $(seq 1 20); do
+    if avahi-daemon --check >/dev/null 2>&1; then
+      ok "avahi 已就绪（客户端可正常注册服务）"
+      return 0
+    fi
+    sleep 0.5
+  done
+  warn "avahi 未在 10 秒内就绪，仍继续（若 MA 看不到设备，重启一次客户端）"
+}
+
+mdns_hits() {
+  local out
+  out="$(timeout 4 avahi-browse -rt _sendspin._tcp 2>/dev/null || true)"
+  printf '%s' "$out" | grep -F -c "name=${DEVICE_NAME}\"" 2>/dev/null || true
+}
+
+verify_mdns_registration() {
+  command -v avahi-browse >/dev/null 2>&1 || return 0
+  local i hits=0
+  for i in $(seq 1 8); do
+    hits="$(mdns_hits)"
+    if [ "${hits:-0}" -gt 0 ]; then
+      ok "mDNS 已广播「${DEVICE_NAME}」"
+      return 0
+    fi
+    sleep 1
+  done
+  warn "未看到本机的 _sendspin._tcp 通告 —— 重启一次客户端重试"
+  systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+  sleep 6
+  hits="$(mdns_hits)"
+  if [ "${hits:-0}" -gt 0 ]; then
+    ok "mDNS 已广播「${DEVICE_NAME}」（重启客户端后恢复）"
+  else
+    warn "仍未广播，MA 里可能看不到本机；请检查: systemctl status avahi-daemon"
   fi
 }
 
@@ -646,6 +782,9 @@ UNIT
 
   systemctl daemon-reload
   systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+  # 必须等 avahi 就绪再启动客户端：否则客户端注册 mDNS 服务会静默失败，
+  # 表现为「主机名能解析、服务不在 browse 里」，MA 永远发现不到设备。
+  ensure_avahi_ready
   systemctl restart "$SERVICE_NAME"
   sleep 6
 
@@ -654,6 +793,7 @@ UNIT
   else
     warn "服务未处于 active，请查看: journalctl -u ${SERVICE_NAME} -n 50"
   fi
+  verify_mdns_registration
 }
 
 summary() {
@@ -667,11 +807,16 @@ summary() {
     warn "未检测到 8928 监听"
   fi
   hr
+  if [ "$WITH_DISPLAY" -eq 1 ] && systemctl cat showtime.service >/dev/null 2>&1; then
+    printf '    屏幕界面: %s / %s\n' "$(systemctl is-enabled showtime 2>/dev/null)" "$(systemctl is-active showtime 2>/dev/null)"
+  fi
   cat <<EOF
 下一步：
   1. 打开 Music Assistant → 设置 → 提供商（Sendspin），应能发现设备「${DEVICE_NAME}」
+     （MA 的发现是触发式扫描：刚装完若没立刻出现，打开该提供商页面或重启 MA 插件即可）
   2. 在 HA 中会出现 media_player 实体，直接播放即可
   3. 首次播放前确认声卡没被其它服务占用
+  4. 播放时屏幕显示黑胶旋转封面；暂停/结束立即停转，停止满 5 秒回时钟
 
 常用命令：
   查看日志   journalctl -u ${SERVICE_NAME} -f
@@ -683,9 +828,9 @@ summary() {
 EOF
 }
 
-# ---------------------------- 可选：屏幕"正在播放"界面 ----------------------------
+# ---------------------------- 屏幕界面：黑胶播放页 + 时钟页 ----------------------------
 install_display() {
-  hr; log "安装屏幕「正在播放」界面"
+  hr; log "安装屏幕界面（黑胶播放页 + 时钟页）"
   local self_dir=""
   if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -696,7 +841,12 @@ install_display() {
     return 0
   fi
   if [ ! -f /opt/aku/showtime/showtime.c ]; then
-    warn "本机没有 /opt/aku/showtime/showtime.c，跳过屏幕改造"
+    warn "本机只有编译好的 showtime 二进制、没有厂商源码 —— 跳过屏幕改造"
+    log "  部分固件批次只发二进制（例如 MQTT 版，无消息时屏幕全黑）。"
+    log "  想要黑胶界面，可从同型号设备复制厂商源码后再装："
+    log "    scp root@<另一台 AkuBox>:/opt/aku/showtime/showtime.c.pre-nowplaying \\"
+    log "        /opt/aku/showtime/showtime.c"
+    log "    sudo bash showtime/install-showtime-nowplaying.sh"
     return 0
   fi
   if bash "$script" -y; then
@@ -704,6 +854,19 @@ install_display() {
   else
     warn "屏幕界面安装失败 —— 播放器本身不受影响，可稍后单独运行该脚本"
     return 0
+  fi
+  # showtime 只写 /dev/fb0，不占声卡；如果之前被当成「争用服务」禁用过，这里恢复它。
+  if systemctl cat showtime.service >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet showtime; then
+      log "  showtime 未运行，重新启用以显示屏幕"
+      systemctl enable --now showtime >/dev/null 2>&1 || warn "启动 showtime 失败"
+      sleep 3
+    fi
+    if systemctl is-active --quiet showtime; then
+      ok "屏幕服务 showtime: $(systemctl is-enabled showtime 2>/dev/null) / active"
+    else
+      warn "showtime 未能启动，请查看: journalctl -u showtime -n 50"
+    fi
   fi
 }
 
@@ -720,6 +883,8 @@ main() {
   audio_conflicts_step
   fetch_sources
   apply_patches
+  # 放在所有需要联网的步骤之后（会重连 WiFi），编译阶段不需要网络，正好错开
+  fix_wifi_powersave
   build_client
 
   if [ "$BUILD_ONLY" -eq 1 ]; then
@@ -729,11 +894,10 @@ main() {
   fi
 
   install_client
-  summary
-
   if [ "$WITH_DISPLAY" -eq 1 ]; then
     install_display
   fi
+  summary
 }
 
 main "$@"

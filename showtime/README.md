@@ -186,6 +186,15 @@ sudo bash install-showtime-nowplaying.sh
 需要已装上 —— 它负责写 `/var/lib/sendspin-client/nowplaying`。
 没装也能编译运行，只是永远显示时钟，不会出错。
 
+**需要厂商源码** `/opt/aku/showtime/showtime.c`。部分固件批次只发编译好的二进制
+（例如 MQTT 版：没有消息时屏幕全黑，也没有源码）。这类设备先复制源码再装：
+
+```bash
+scp root@<同型号 AkuBox>:/opt/aku/showtime/showtime.c.pre-nowplaying /opt/aku/showtime/showtime.c
+```
+
+> 本仓库只提供补丁、不重新分发厂商源码；复制是在你自己的两台设备之间进行。
+
 编译依赖：`libfreetype-dev libpng-dev libcurl4-openssl-dev pkg-config`
 
 ## 回滚
