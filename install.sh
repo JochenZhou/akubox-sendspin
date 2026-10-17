@@ -57,6 +57,7 @@ BUILD_ONLY=0
 SKIP_LEGACY_PATCH=0
 WITH_DISPLAY=1          # 默认顺带装屏幕界面（黑胶播放页 + 时钟页）；--no-display 可跳过
 NO_POWERSAVE=0          # 默认关闭 WiFi 省电；--no-powersave 可跳过
+DISPLAY_BIN=""          # --display-bin: 直接用预编译 showtime 二进制（无需源码/编译）
 FREE_AUDIO=0
 FREE_AUDIO_EXPLICIT=0
 ASSUME_YES=0
@@ -121,6 +122,10 @@ AkuBox Sendspin Client 安装脚本
   --build-only           只克隆+打补丁+编译，不安装、不写 systemd
   --with-display         安装屏幕界面（黑胶播放页 + 时钟页）—— 现在是默认行为
   --no-display           不装屏幕界面，只装播放器
+  --display-bin <路径|URL>
+                         直接用预编译好的 showtime 二进制安装屏幕界面：
+                         跳过打补丁与编译，不需要厂商源码，约 5 秒完成。
+                         也可把二进制放到 showtime/prebuilt/showtime.armv7 自动使用。
   --no-powersave         不关闭 WiFi 省电
                          （默认会关闭，见下方「为什么要关 WiFi 省电」）
   --skip-legacy-ma-patch 不应用 MA 2.10.x 兼容补丁（仅当 MA >= 2.11 / aiosendspin 10.x）
@@ -160,6 +165,7 @@ while [ $# -gt 0 ]; do
     --build-only)          BUILD_ONLY=1; shift ;;
     --with-display)        WITH_DISPLAY=1; shift ;;
     --no-display)          WITH_DISPLAY=0; shift ;;
+    --display-bin)         DISPLAY_BIN="${2:?--display-bin 需要路径或 URL}"; shift 2 ;;
     --no-powersave)        NO_POWERSAVE=1; shift ;;
     --skip-legacy-ma-patch) SKIP_LEGACY_PATCH=1; shift ;;
     --free-audio)          FREE_AUDIO=1; shift ;;
@@ -840,16 +846,18 @@ install_display() {
     warn "未找到 ${script}（单文件方式运行时没有该目录），跳过"
     return 0
   fi
-  if [ ! -f /opt/aku/showtime/showtime.c ]; then
+  if [ ! -f /opt/aku/showtime/showtime.c ] && [ -z "${DISPLAY_BIN:-}" ]; then
     warn "本机只有编译好的 showtime 二进制、没有厂商源码 —— 跳过屏幕改造"
-    log "  部分固件批次只发二进制（例如 MQTT 版，无消息时屏幕全黑）。"
-    log "  想要黑胶界面，可从同型号设备复制厂商源码后再装："
-    log "    scp root@<另一台 AkuBox>:/opt/aku/showtime/showtime.c.pre-nowplaying \\"
-    log "        /opt/aku/showtime/showtime.c"
-    log "    sudo bash showtime/install-showtime-nowplaying.sh"
+    log "  用预编译产物安装（推荐，不需要源码）："
+    log "    sudo bash install.sh --display-bin /path/to/showtime.armv7"
+    log "  或把二进制放到 showtime/prebuilt/showtime.armv7 后重跑"
+    log "  预编译产物可从另一台同型号 AkuBox 复制："
+    log "    scp root@<另一台>:/opt/aku/showtime/showtime /tmp/showtime.armv7"
     return 0
   fi
-  if bash "$script" -y; then
+  local -a dargs=(-y)
+  if [ -n "${DISPLAY_BIN:-}" ]; then dargs+=(--bin "$DISPLAY_BIN"); fi
+  if bash "$script" "${dargs[@]}"; then
     ok "屏幕界面已安装"
   else
     warn "屏幕界面安装失败 —— 播放器本身不受影响，可稍后单独运行该脚本"

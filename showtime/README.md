@@ -186,14 +186,27 @@ sudo bash install-showtime-nowplaying.sh
 需要已装上 —— 它负责写 `/var/lib/sendspin-client/nowplaying`。
 没装也能编译运行，只是永远显示时钟，不会出错。
 
-**需要厂商源码** `/opt/aku/showtime/showtime.c`。部分固件批次只发编译好的二进制
-（例如 MQTT 版：没有消息时屏幕全黑，也没有源码）。这类设备先复制源码再装：
+**两种安装方式**（脚本自动选择，`--force-build` 可强制源码编译）：
 
 ```bash
-scp root@<同型号 AkuBox>:/opt/aku/showtime/showtime.c.pre-nowplaying /opt/aku/showtime/showtime.c
+# A. 预编译（约 5 秒）：--bin 指定，或放到 showtime/prebuilt/showtime.armv7 自动使用
+sudo bash install-showtime-nowplaying.sh --bin /tmp/showtime.armv7 -y
+
+# B. 源码编译（默认）：需要厂商源码 + gcc 开发包
+sudo bash install-showtime-nowplaying.sh -y
 ```
 
-> 本仓库只提供补丁、不重新分发厂商源码；复制是在你自己的两台设备之间进行。
+预编译路径会校验 `ELF 32-bit ARM` 与 `ldd` 无缺失才部署，只适用于**同型号**设备。
+源码编译需要 `/opt/aku/showtime/showtime.c`；部分固件批次只发二进制（例如 MQTT 版，
+没有消息时屏幕全黑、也没有源码）—— 这种设备直接用上面的预编译路径，从另一台同型号
+AkuBox 复制二进制即可：
+
+```bash
+scp root@<另一台>:/opt/aku/showtime/showtime /tmp/showtime.armv7
+```
+
+> 本仓库只提供补丁与脚本、不重新分发厂商二进制；`prebuilt/` 目录默认空的，
+> 由你自己放入（详见 [prebuilt/README.md](prebuilt/README.md)）。
 
 编译依赖：`libfreetype-dev libpng-dev libcurl4-openssl-dev pkg-config`
 

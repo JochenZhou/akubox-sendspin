@@ -296,17 +296,30 @@ AkuBox 有一块 162×132 的 SPI 小屏，默认只显示时钟。加上屏幕�
 # 默认就装屏幕界面；只装播放器用 --no-display
 sudo bash install.sh
 
+# 没有厂商源码的设备（部分固件批次只发二进制）：用预编译产物，几秒装好
+sudo bash install.sh --display-bin /tmp/showtime.armv7
+
 # 播放器已装好，也可单独装/更新屏幕部分
 sudo bash showtime/install-showtime-nowplaying.sh
 ```
 
-> **注意**：屏幕改造需要厂商源码 `/opt/aku/showtime/showtime.c`。部分固件批次只发编译好的
-> 二进制（例如 MQTT 版，没有消息时屏幕全黑、也不带源码）。这种设备上脚本会给出提示并跳过；
-> 从同型号设备复制源码后重跑即可：
+**两种安装方式**（脚本自动选择）：
+
+| 方式 | 条件 | 耗时 |
+|---|---|---|
+| **预编译** `--bin` / `--display-bin` | 同型号设备；把二进制放 `showtime/prebuilt/showtime.armv7` 即自动使用 | **~5 秒** |
+| 源码编译（默认） | 需要厂商源码 `/opt/aku/showtime/showtime.c` + gcc 开发包 | 1-3 分钟 |
+
+预编译产物只适用于**同型号**（`AKU R8-AkuBox`、st7735sfb 162×132、Ubuntu 22.04 armhf）。
+安装前会校验 `ELF 32-bit ARM` 与 `ldd` 无缺失，不满足直接拒绝。你这台 `.180` 的可移植性
+已实测：两台设备的产物 md5 完全相同（`189993a416bd`）。
+
+> **没有厂商源码怎么办**：部分固件批次只发编译好的二进制（例如 MQTT 版，没有消息时屏幕全黑）。
+> 不用再折腾源码，直接从另一台同型号设备把**编译好的二进制**复制过来即可：
 >
 > ```bash
-> scp root@<另一台 AkuBox>:/opt/aku/showtime/showtime.c.pre-nowplaying /opt/aku/showtime/showtime.c
-> sudo bash /tmp/akubox-sendspin/showtime/install-showtime-nowplaying.sh
+> scp root@<另一台 AkuBox>:/opt/aku/showtime/showtime /tmp/showtime.armv7
+> sudo bash install.sh --display-bin /tmp/showtime.armv7
 > ```
 
 实现方式与 MQTT / HA 自动化无关 —— sendspin 协议本身就把元数据送到了设备，客户端补丁 `0003`
@@ -385,6 +398,8 @@ nmcli con up <连接UUID>
 │   ├── screenshots/                         # 真机抓帧（README 用图）
 │   │   ├── player-vinyl.png
 │   │   └── clock.png
+│   ├── prebuilt/                            # 预编译二进制放这里（默认空，自备）
+│   │   └── README.md
 │   └── patches/showtime-nowplaying.patch    # 对厂商 showtime.c 的改动
 ├── config/sendspin-client.conf.example      # 配置样例
 └── systemd/sendspin-client.service          # systemd 单元参考
