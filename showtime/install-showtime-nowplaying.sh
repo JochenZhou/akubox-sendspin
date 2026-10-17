@@ -31,16 +31,29 @@ NOWPLAYING="/var/lib/sendspin-client/nowplaying"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH="${SCRIPT_DIR}/patches/showtime-nowplaying.patch"
-PREBUILT_DEFAULT="${SCRIPT_DIR}/prebuilt/showtime.armv7"
+FONT_NAME="wwDigital.ttf"
+
+# 预编译产物与字体：优先仓库根的 prebuilt/（新布局），兼容旧的 showtime/prebuilt/
+prebuilt_candidates=(
+  "${SCRIPT_DIR}/../prebuilt/showtime.armv7"
+  "${SCRIPT_DIR}/prebuilt/showtime.armv7"
+)
+font_candidates=(
+  "${SCRIPT_DIR}/../prebuilt/fonts/${FONT_NAME}"
+  "${SCRIPT_DIR}/fonts/${FONT_NAME}"
+  "${SCRIPT_DIR}/prebuilt/fonts/${FONT_NAME}"
+)
 
 MODE=""                 # bin | build（留空=自动选择）
 BIN_SRC=""
+FONT_SRC=""             # --font: 指定字体文件（默认从 prebuilt/fonts/ 找）
 DO_BACKUP=1
 ASSUME_YES=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --bin)         MODE=bin; BIN_SRC="${2:?--bin 需要路径或 URL}"; shift 2 ;;
+    --font)        FONT_SRC="${2:?--font 需要字体路径}"; shift 2 ;;
     --force-build) MODE=build; shift ;;
     --no-backup)   DO_BACKUP=0; shift ;;
     -y|--yes)      ASSUME_YES=1; shift ;;
@@ -56,11 +69,66 @@ die()  { printf '[✗] %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "请用 root 运行"
 
+first_existing() {
+  local f
+  for f in "$@"; do [ -f "$f" ] && { printf '%s' "$f"; return 0; }; done
+  return 1
+}
+
+# 字体必须落在 /opt/aku/showtime —— showtime 用相对路径 ./wwDigital.ttf 加载
+ensure_font() {
+  local dst="${SHOWTIME_DIR}/${FONT_NAME}" src=""
+  if [ -s "$dst" ]; then
+    ok "字体已存在: ${dst}（$(stat -c%s "$dst") 字节）"
+    return 0
+  fi
+  if [ -n "${FONT_SRC:-}" ]; then
+    [ -f "$FONT_SRC" ] || die "找不到字体: ${FONT_SRC}"
+    src="$FONT_SRC"
+  else
+    src="$(first_existing "${font_candidates[@]}" || true)"
+  fi
+  if [ -n "$src" ]; then
+    install -m0644 "$src" "$dst"
+    ok "已安装字体: ${dst}（来自 ${src}）"
+  else
+    warn "缺少字体 ${FONT_NAME} —— 时钟数字可能不显示"
+    warn "把它放到 prebuilt/fonts/${FONT_NAME} 后重跑，或用 --font 指定"
+    return 1
+  fi
+}
+
+# 启动脚本 + 工作目录：showtime 相对路径加载字体，CWD 必须是 /opt/aku/showtime
+ensure_launcher_and_cwd() {
+  local sh="${SHOWTIME_DIR}/showtime.sh"
+  if [ ! -f "$sh" ]; then
+    cat > "$sh" <<'LAUNCH'
+#!/bin/bash
+cd /opt/aku/showtime
+LOG_DIR="/opt/aku/showtime/log"
+mkdir -p "$LOG_DIR"
+/opt/aku/showtime/showtime > "$LOG_DIR/showtime.log" 2>&1 &
+echo $! > /opt/aku/showtime/showtime.pid
+LAUNCH
+    chmod 0755 "$sh"
+    ok "已生成启动脚本 ${sh}"
+  fi
+  # drop-in 固定工作目录：防止单元直接 ExecStart 二进制时 CWD=/ 而找不到字体
+  local dd="/etc/systemd/system/${SERVICE}.service.d"
+  if [ ! -f "${dd}/workingdir.conf" ]; then
+    install -d "$dd"
+    printf '[Service]\nWorkingDirectory=%s\n' "$SHOWTIME_DIR" > "${dd}/workingdir.conf"
+    systemctl daemon-reload
+    ok "已设置 WorkingDirectory=${SHOWTIME_DIR}（drop-in）"
+  fi
+}
+
 # ---- 自动选择模式 ----
 if [ -z "$MODE" ]; then
-  if [ -f "$PREBUILT_DEFAULT" ]; then
-    MODE=bin; BIN_SRC="$PREBUILT_DEFAULT"
-    log "发现预编译产物: ${PREBUILT_DEFAULT}（用 --force-build 可改为源码编译）"
+  BIN_AUTO="$(first_existing "${prebuilt_candidates[@]}" || true)"
+  if [ -n "$BIN_AUTO" ]; then
+    MODE=bin; BIN_SRC="$BIN_AUTO"
+    log "发现预编译产物: ${BIN_AUTO}（用 --force-build 可改为源码编译）"
   else
     MODE=build
   fi
@@ -128,10 +196,15 @@ if [ "$MODE" = bin ]; then
   fetch_bin "$BIN_SRC"
 
   log "部署"
+  install -d "$SHOWTIME_DIR"
+  ensure_font || warn "字体缺失，屏幕数字可能不显示"
+  ensure_launcher_and_cwd
   if systemctl is-active --quiet "$SERVICE"; then
     systemctl stop "$SERVICE"; sleep 1
   fi
-  [ "$DO_BACKUP" -eq 1 ] && [ ! -f "${BIN}.pre-nowplaying" ] && cp -a "$BIN" "${BIN}.pre-nowplaying"
+  if [ "$DO_BACKUP" -eq 1 ] && [ -f "$BIN" ] && [ ! -f "${BIN}.pre-nowplaying" ]; then
+    cp -a "$BIN" "${BIN}.pre-nowplaying"
+  fi
   cp -a "$STAGE" "$BIN"
   chmod 0755 "$BIN"
   systemctl start "$SERVICE"
@@ -194,12 +267,16 @@ ok "编译完成: $(ls -l showtime.new | awk '{print $5}') 字节"
 validate_bin "$SHOWTIME_DIR/showtime.new"
 
 log "部署"
+ensure_font || warn "字体缺失，屏幕数字可能不显示"
+ensure_launcher_and_cwd
 if systemctl is-active --quiet "$SERVICE"; then
   systemctl stop "$SERVICE"
   sleep 1
 fi
 # 运行中的二进制被占用，必须先停服务再覆盖（否则 Text file busy）
-[ "$DO_BACKUP" -eq 1 ] && [ ! -f "${BIN}.pre-nowplaying" ] && cp -a "$BIN" "${BIN}.pre-nowplaying"
+if [ "$DO_BACKUP" -eq 1 ] && [ -f "$BIN" ] && [ ! -f "${BIN}.pre-nowplaying" ]; then
+  cp -a "$BIN" "${BIN}.pre-nowplaying"
+fi
 cp -a showtime.new "$BIN"
 chmod 0755 "$BIN"
 systemctl start "$SERVICE"

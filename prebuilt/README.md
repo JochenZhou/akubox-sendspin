@@ -1,52 +1,64 @@
-# 预编译二进制放这里（可选，能省掉 30-40 分钟编译）
+# 预编译产物（仓库自带，新设备免编译）
 
 ```
-prebuilt/sendspin-client.armv7     # 播放器（含 7 处兼容补丁）
+prebuilt/
+├── sendspin-client.armv7     # 播放器守护进程（含本仓库 7 处兼容补丁）
+├── showtime.armv7            # 屏幕界面（黑胶播放页 + 时钟页）
+├── fonts/wwDigital.ttf       # 屏幕数字字体（showtime 用相对路径 ./wwDigital.ttf 加载）
+└── SHA256SUMS                # 三个文件的校验和
 ```
 
-放好后安装脚本会**自动发现并使用**，跳过 clone / 打补丁 / 编译：
+有这些文件时，一键脚本**默认就用它们**，全程不需要编译：
 
 ```bash
-sudo bash install.sh -y                                    # 自动用 prebuilt/
-sudo bash install.sh --client-bin /path/to/sendspin-client.armv7 -y
-sudo bash install.sh --build-only                          # 强制源码编译（--client-bin 与它冲突）
+git clone https://github.com/JochenZhou/akubox-sendspin.git /tmp/akubox-sendspin
+sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
 ```
 
-全自动安装从 **30-40 分钟压到约 1 分钟**（剩下的时间主要是装依赖与 mDNS 校验）。
+正常情况**1-2 分钟**装完（对比源码编译的 30-40 分钟 + 屏幕 1-3 分钟）。
 
-## 这个二进制从哪来
+## 产物信息
 
-**必须是在同类设备上自己编译、且打过补丁的产物**：
+| 文件 | 大小 | md5 | 说明 |
+|---|---|---|---|
+| `sendspin-client.armv7` | 1161764 | `343a7a4a9094` | 上游 v0.5.2（`b3d209f9`）+ sendspin-cpp v0.9.4（`81216ba6`）打上 `patches/0001~0003` |
+| `showtime.armv7` | 29496 | `189993a416bd` | 厂商 `showtime.c`（27219 字节，md5 `275fc485…`）打上 `showtime/patches/showtime-nowplaying.patch` |
+| `fonts/wwDigital.ttf` | 59612 | `a3e85aa95ea2` | 设备自带的显示字体 |
+
+在 `AKU R8-AkuBox`（Ubuntu 22.04.5 armhf / Kernel 6.1.9 / gcc 11.4.0）上编译，
+并**在该型号的两台不同设备上实测**：产物的代码区逐字节一致（`sendspin-client` 两者仅差
+27 字节，全部落在 ELF BuildID note 区）。
+
+## 适用条件
+
+- 型号：`AKU R8-AkuBox`，屏 `st7735sfb` 162×132 16bpp
+- 系统：Ubuntu 22.04 armhf（glibc 2.35），运行库 `libfreetype6` / `libpng16-16` / `libcurl4`
+- `showtime` 还要求把字体放在 `/opt/aku/showtime/wwDigital.ttf`（脚本会自动补）
+  且服务的**工作目录**是 `/opt/aku/showtime`（脚本会用 systemd drop-in 固定）
+
+不满足就去源码编译：`install.sh --build-only`（播放器）或
+`showtime/install-showtime-nowplaying.sh --force-build`（屏幕）。
+
+## 校验
+
+安装脚本会依次检查，任一不过直接拒绝：
+
+1. `ELF 32-bit ARM`
+2. `ldd` 无 `not found`
+3. 播放器额外检查三个补丁标记：`(legacy server); trying all`、`Advertising   : %zu formats`、`/nowplaying`
+
+手动核对：
 
 ```bash
-# 从另一台已装好的同型号 AkuBox 取
-scp root@<另一台>:/usr/bin/sendspin-client /tmp/sendspin-client.armv7
+cd prebuilt && sha256sum -c SHA256SUMS
 ```
 
-❌ **不要用上游官方 armhf 发布包** —— 它要求 glibc 2.38 / GLIBCXX 3.4.32，
-Ubuntu 22.04（glibc 2.35）根本加载不了。
+## 关于许可
 
-## 为什么两台设备能用同一个文件
-
-真机实测（两台 `AKU R8-AkuBox`，同为 Ubuntu 22.04.5 armhf、Kernel 6.1.9、gcc 11.4.0）：
-
-| 项目 | 结果 |
-|---|---|
-| 大小 | 两台都是 1161764 字节 |
-| 字节差异 | **仅 27 字节** |
-| 差异位置 | 全部落在两处 ELF BuildID note 区（`f6dfafb8…` vs `fc5b936a…`） |
-| 动态库依赖 | 完全相同的 16 个库，`ldd` 无缺失 |
-| 补丁标记 | `(legacy server); trying all` / `Advertising   : %zu formats` / `/nowplaying` 全部存在 |
-
-也就是：**代码区逐字节一致**，差异只是链接器生成的唯一 ID，功能上是同一个程序。
-
-## 安装前的校验（不满足直接拒绝）
-
-1. 必须是 **ELF 32-bit ARM**
-2. `ldd` 不能有 `not found`（glibc/发行版不匹配会在这里失败）
-3. 三个补丁标记必须齐全 —— 防止把**未打补丁**的构建装上去（那种连 MA 2.10 会握手失败或静默无声）
-
-## 本仓库不附带二进制
-
-`prebuilt/` 默认是空的，只放这份说明。仓库只分发**补丁与脚本**，不重新分发上游客户端
-或其编译产物 —— 二进制请自行准备（从你自己另一台设备复制，或本地编译）。
+- `sendspin-client.armv7` 来自 Apache-2.0 的上游 `TermeHansen/sendspin-client` 与
+  `Sendspin/sendspin-cpp`，本仓库的补丁以 MIT 发布；二进制随附上游许可（见仓库 `LICENSE`
+  与上游仓库）。上游版权归其作者所有。
+- `showtime.armv7` 与 `wwDigital.ttf` 是 **AkuBox 厂商随设备提供的程序/字体的编译产物**，
+  并非开源软件。此处仅作**互操作性用途**提供给同型号设备的机主，用于恢复/替换本机界面。
+  权利人如有异议，请开 issue，会立即移除。
+- 本目录不含厂商源码（`showtime.c` 不随仓库分发）。

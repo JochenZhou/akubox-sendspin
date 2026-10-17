@@ -189,24 +189,20 @@ sudo bash install-showtime-nowplaying.sh
 **两种安装方式**（脚本自动选择，`--force-build` 可强制源码编译）：
 
 ```bash
-# A. 预编译（约 5 秒）：--bin 指定，或放到 showtime/prebuilt/showtime.armv7 自动使用
-sudo bash install-showtime-nowplaying.sh --bin /tmp/showtime.armv7 -y
-
-# B. 源码编译（默认）：需要厂商源码 + gcc 开发包
+# A. 预编译（默认）：仓库 prebuilt/showtime.armv7 存在就用它，约 5 秒
 sudo bash install-showtime-nowplaying.sh -y
+
+# 指定别的产物 / 字体
+sudo bash install-showtime-nowplaying.sh --bin /tmp/showtime.armv7 --font /tmp/wwDigital.ttf -y
+
+# B. 源码编译（需要厂商源码 + gcc 开发包，1-3 分钟）
+sudo bash install-showtime-nowplaying.sh --force-build -y
 ```
 
 预编译路径会校验 `ELF 32-bit ARM` 与 `ldd` 无缺失才部署，只适用于**同型号**设备。
-源码编译需要 `/opt/aku/showtime/showtime.c`；部分固件批次只发二进制（例如 MQTT 版，
-没有消息时屏幕全黑、也没有源码）—— 这种设备直接用上面的预编译路径，从另一台同型号
-AkuBox 复制二进制即可：
-
-```bash
-scp root@<另一台>:/opt/aku/showtime/showtime /tmp/showtime.armv7
-```
-
-> 本仓库只提供补丁与脚本、不重新分发厂商二进制；`prebuilt/` 目录默认空的，
-> 由你自己放入（详见 [prebuilt/README.md](prebuilt/README.md)）。
+脚本还会自动：把字体装到 `/opt/aku/showtime/wwDigital.ttf`（`showtime` 用相对路径
+`./wwDigital.ttf` 加载）、补齐 `showtime.sh`、并用 systemd drop-in 固定
+`WorkingDirectory=/opt/aku/showtime` —— 少任何一项，时钟数字都不显示。
 
 编译依赖：`libfreetype-dev libpng-dev libcurl4-openssl-dev pkg-config`
 

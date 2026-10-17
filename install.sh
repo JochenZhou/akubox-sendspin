@@ -67,6 +67,7 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
 fi
 PREBUILT_DIR="${SELF_DIR}/prebuilt"
 PREBUILT_CLIENT_DEFAULT="${PREBUILT_DIR}/sendspin-client.armv7"
+PREBUILT_SHOWTIME_DEFAULT="${PREBUILT_DIR}/showtime.armv7"
 FREE_AUDIO=0
 FREE_AUDIO_EXPLICIT=0
 ASSUME_YES=0
@@ -134,7 +135,7 @@ AkuBox Sendspin Client 安装脚本
   --display-bin <路径|URL>
                          直接用预编译好的 showtime 二进制安装屏幕界面：
                          跳过打补丁与编译，不需要厂商源码，约 5 秒完成。
-                         也可把二进制放到 showtime/prebuilt/showtime.armv7 自动使用。
+                         也可把二进制放到 prebuilt/showtime.armv7 自动使用。
   --client-bin <路径|URL>
                          直接用预编译好的 sendspin-client（含 7 处兼容补丁）：
                          跳过 clone / 打补丁 / 编译，30-40 分钟的编译变成几秒。
@@ -983,6 +984,12 @@ main() {
     fetch_sources
     apply_patches
     build_client
+  fi
+
+  # 屏幕界面也默认用仓库内的预编译产物（缺失时由屏幕脚本回退到源码编译）
+  if [ "$WITH_DISPLAY" -eq 1 ] && [ -z "$DISPLAY_BIN" ] && [ -f "$PREBUILT_SHOWTIME_DEFAULT" ]; then
+    DISPLAY_BIN="$PREBUILT_SHOWTIME_DEFAULT"
+    log "发现预编译屏幕界面: ${PREBUILT_SHOWTIME_DEFAULT}"
   fi
 
   if [ "$BUILD_ONLY" -eq 1 ]; then

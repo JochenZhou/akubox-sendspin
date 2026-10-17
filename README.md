@@ -31,24 +31,32 @@ sudo bash /tmp/akubox-sendspin/install.sh
 
 | 用法 | 效果 |
 |---|---|
-| `install.sh`（默认） | 播放器 + 关闭 WiFi 省电 + 黑胶屏幕界面 |
-| `install.sh --client-bin <路径\|URL>` | **跳过 clone/补丁/编译**，直接用预编译客户端（30-40 分钟 → 约 1 分钟） |
-| `install.sh --display-bin <路径\|URL>` | 屏幕界面用预编译二进制（不需要厂商源码） |
+| `install.sh`（默认） | 播放器 + WiFi 省电 + 黑胶屏幕界面，**全部用仓库 `prebuilt/`，不编译** |
+| `install.sh --client-bin <路径\|URL>` | 换成你指定的播放器产物（默认已用 `prebuilt/`） |
+| `install.sh --display-bin <路径\|URL>` | 换成你指定的屏幕产物（默认已用 `prebuilt/`） |
+| `install.sh --build-only` | 强制走源码编译（播放器） |
 | `install.sh --no-display` | 只装播放器，不动屏幕 |
 | `install.sh --no-powersave` | 不关闭 WiFi 省电 |
 
-### 用预编译二进制（可选，快很多）
+### 仓库自带预编译产物（默认就走这条路，不用编译）
 
-播放器本身的编译在单核 ARM 上要 **30-40 分钟**。同型号 + 同发行版的设备可以直接复用产物：
+播放器在单核 ARM 上编译要 **30-40 分钟**、屏幕界面还要 1-3 分钟。本仓库已把产物放在
+`prebuilt/`（播放器 + 屏幕 + 字体，见 [prebuilt/README.md](prebuilt/README.md)），
+所以**一条命令、1-2 分钟**就能装完：
 
 ```bash
-# 从另一台同型号设备取编译好的客户端
-scp root@<另一台>:/usr/bin/sendspin-client /tmp/sendspin-client.armv7
-sudo bash install.sh --client-bin /tmp/sendspin-client.armv7 --name "客厅 AkuBox" -y
+git clone https://github.com/JochenZhou/akubox-sendspin.git /tmp/akubox-sendspin
+sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
 ```
 
-也可以把文件放到仓库根的 `prebuilt/sendspin-client.armv7`，脚本会自动发现并使用
-（详见 [prebuilt/README.md](prebuilt/README.md)）。
+脚本默认行为：`prebuilt/` 里的播放器与屏幕产物存在 → 直接用；不存在 → 回退源码编译。
+
+想自己指定别的产物（比如另一台设备上编译的）：
+
+```bash
+sudo bash install.sh --client-bin  /tmp/sendspin-client.armv7 \
+                     --display-bin /tmp/showtime.armv7 --name "客厅 AkuBox" -y
+```
 
 **为什么可以复用**：两台 `AKU R8-AkuBox`（同为 Ubuntu 22.04 armhf）各自编译的产物
 大小同为 1161764 字节，**只差 27 字节，且全部落在 ELF BuildID note 区**
