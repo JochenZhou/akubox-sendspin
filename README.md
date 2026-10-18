@@ -70,6 +70,45 @@ sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
     屏幕界面: enabled / active
 ```
 
+**常用开关**
+
+| 参数 | 作用 |
+|---|---|
+| `--name "<名称>"` | 设备显示名（多台务必不同） |
+| `-y` | 全自动，不交互 |
+| `--no-deps` | 完全不碰 apt（跳过依赖安装） |
+| `--no-display` | 只装播放器，不动屏幕 |
+| `--no-powersave` | 不关闭 WiFi 省电 |
+| `--client-bin <路径\|URL>` | 换成指定的播放器产物（默认用 `prebuilt/`） |
+| `--display-bin <路径\|URL>` | 换成指定的屏幕产物（默认用 `prebuilt/`） |
+| `--build-only` | 只编译不安装（源码模式，产物留在 `/opt/sendspin-client/build/`） |
+| `--free-audio` | 停止并禁用与声卡争用的服务（如语音助手） |
+
+#### 关于依赖（预编译模式下只装 7 个运行期包）
+
+用仓库自带的固件时**不需要编译工具链**，脚本只检查运行期依赖：
+
+| 包 | 用途 |
+|---|---|
+| `avahi-daemon` | mDNS 广播，MA 靠它发现设备 |
+| `avahi-utils` | `avahi-browse` / `avahi-resolve`，安装时自检注册是否成功 |
+| `iw` | 关闭 WiFi 省电、读 SSID |
+| `alsa-utils` | `amixer`（硬件混音器）、`aplay`（声卡探测） |
+| `psmisc` | `fuser`，查谁占着 `/dev/snd` |
+| `libavahi-compat-libdnssd1` | 播放器依赖的 `libdns_sd.so.1` |
+| `libasound2` | 播放器依赖的 `libasound.so.2` |
+
+**不再安装** `cmake` / `build-essential` / `pkg-config` / `libasound2-dev` /
+`libavahi-compat-libdnssd-dev` —— 那些只在源码编译时需要。
+
+如果设备不方便动 apt（离线、源不稳），加 `--no-deps` 直接跳过：
+
+```bash
+sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y --no-deps
+```
+
+缺了运行库会在后面的校验阶段明确报出来（`ldd` 的 `not found`），不会静默装上个跑不起来的二进制。
+
 ### 第 2 步：在 Music Assistant 里添加
 
 1. 打开 MA → **设置 → 提供商 → Sendspin**

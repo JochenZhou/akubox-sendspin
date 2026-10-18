@@ -57,6 +57,7 @@ BUILD_ONLY=0
 SKIP_LEGACY_PATCH=0
 WITH_DISPLAY=1          # 默认顺带装屏幕界面（黑胶播放页 + 时钟页）；--no-display 可跳过
 NO_POWERSAVE=0          # 默认关闭 WiFi 省电；--no-powersave 可跳过
+NO_DEPS=0               # --no-deps: 完全不碰 apt（跳过依赖安装）
 DISPLAY_BIN=""          # --display-bin: 直接用预编译 showtime 二进制（无需源码/编译）
 CLIENT_BIN=""           # --client-bin: 直接用预编译 sendspin-client（跳过 clone/补丁/编译）
 CLIENT_BIN_FILE=""      # 校验通过后的实际文件（本地路径或下载到临时文件）
@@ -143,6 +144,8 @@ AkuBox Sendspin Client 安装脚本
                          要求同型号 + 同发行版（glibc/GLIBCXX 一致），脚本会校验。
   --no-powersave         不关闭 WiFi 省电
                          （默认会关闭，见下方「为什么要关 WiFi 省电」）
+  --no-deps              完全不碰 apt：跳过依赖安装，直接按现有环境装。
+                         预编译模式下通常只缺 avahi-utils；缺运行库会在校验阶段报出来。
   --skip-legacy-ma-patch 不应用 MA 2.10.x 兼容补丁（仅当 MA >= 2.11 / aiosendspin 10.x）
   --free-audio           停止并禁用探测到的声卡争用服务（非交互时仍需 -y 才不再询问）
   --free-audio-services <列表>
@@ -183,6 +186,7 @@ while [ $# -gt 0 ]; do
     --display-bin)         DISPLAY_BIN="${2:?--display-bin 需要路径或 URL}"; shift 2 ;;
     --client-bin)          CLIENT_BIN="${2:?--client-bin 需要路径或 URL}"; shift 2 ;;
     --no-powersave)        NO_POWERSAVE=1; shift ;;
+    --no-deps)             NO_DEPS=1; shift ;;
     --skip-legacy-ma-patch) SKIP_LEGACY_PATCH=1; shift ;;
     --free-audio)          FREE_AUDIO=1; shift ;;
     --free-audio-services)
@@ -249,14 +253,46 @@ preflight() {
   ok "磁盘空间充足（$parent 剩余 $((avail_kb/1024)) MB）"
 }
 
-# ---------------------------- 依赖安装 ----------------------------
+# ---------------------------- 客户端来源判定（必须在装依赖之前） ----------------------------
+# 预编译模式不需要任何编译工具链，只装运行期依赖；源码模式才要 cmake / -dev 开发包。
+USE_PREBUILT=0
+decide_client_source() {
+  if [ -z "$CLIENT_BIN" ] && [ -n "$PREBUILT_DIR" ] && [ -f "$PREBUILT_CLIENT_DEFAULT" ]; then
+    CLIENT_BIN="$PREBUILT_CLIENT_DEFAULT"
+    log "发现预编译客户端: ${PREBUILT_CLIENT_DEFAULT}"
+    log "  （想改为源码编译：删掉该文件，或加 --build-only）"
+  fi
+  if [ -n "$CLIENT_BIN" ]; then
+    [ "$BUILD_ONLY" -eq 1 ] && die "--build-only 与 --client-bin 冲突：预编译模式不编译"
+    USE_PREBUILT=1
+  else
+    USE_PREBUILT=0
+  fi
+}
+
 install_deps() {
   hr; log "安装依赖"
+  if [ "${NO_DEPS:-0}" -eq 1 ]; then
+    log "已指定 --no-deps，跳过依赖安装"
+    log "  （预编译模式只需运行库；缺库会在校验阶段明确报出来）"
+    return 0
+  fi
   export DEBIAN_FRONTEND=noninteractive
-  # alsa-utils(aplay/amixer) 与 psmisc(fuser) 用于声卡探测，必须显式依赖
-  local pkgs=(git cmake pkg-config build-essential libasound2-dev
-              libavahi-compat-libdnssd-dev avahi-daemon avahi-utils iw
-              alsa-utils psmisc)
+  # 运行期依赖（任何模式都要）：
+  #   avahi-daemon / avahi-utils   mDNS 广播与服务注册自检
+  #   iw                           关闭 WiFi 省电、读 SSID
+  #   alsa-utils (aplay/amixer)    声卡探测与硬件混音器
+  #   psmisc (fuser)               查谁占着 /dev/snd
+  local pkgs=(avahi-daemon avahi-utils iw alsa-utils psmisc)
+  if [ "${USE_PREBUILT:-0}" -eq 1 ]; then
+    # 预编译模式：只补二进制需要的运行库，不装 cmake / build-essential / -dev 开发包
+    pkgs+=(libavahi-compat-libdnssd1 libasound2)
+    log "  预编译模式：只检查运行期依赖（不装 cmake / 开发包）"
+  else
+    pkgs+=(git cmake pkg-config build-essential libasound2-dev
+           libavahi-compat-libdnssd-dev)
+    log "  源码编译模式：需要工具链与开发包"
+  fi
   local missing=()
   local p
   for p in "${pkgs[@]}"; do
@@ -965,20 +1001,13 @@ main() {
 
   preflight
   interactive_name_step
+  # 先判定客户端来源：预编译模式只需运行期依赖，不必拉 cmake/开发包
+  decide_client_source
   install_deps
   resolve_audio
   audio_conflicts_step
 
-  # ---- 客户端来源：预编译优先（--client-bin 指定，或 prebuilt/ 命中）----
-  local use_bin=0
-  if [ -z "$CLIENT_BIN" ] && [ -n "$PREBUILT_DIR" ] && [ -f "$PREBUILT_CLIENT_DEFAULT" ]; then
-    CLIENT_BIN="$PREBUILT_CLIENT_DEFAULT"
-    log "发现预编译客户端: ${PREBUILT_CLIENT_DEFAULT}"
-    log "  （想改为源码编译：删掉该文件，或加 --build-only）"
-  fi
-  if [ -n "$CLIENT_BIN" ]; then
-    [ "$BUILD_ONLY" -eq 1 ] && die "--build-only 与 --client-bin 冲突：预编译模式不编译"
-    use_bin=1
+  if [ "$USE_PREBUILT" -eq 1 ]; then
     prepare_client_bin "$CLIENT_BIN"
   else
     fetch_sources
