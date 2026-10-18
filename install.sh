@@ -58,6 +58,7 @@ SKIP_LEGACY_PATCH=0
 WITH_DISPLAY=1          # 默认顺带装屏幕界面（黑胶播放页 + 时钟页）；--no-display 可跳过
 NO_POWERSAVE=0          # 默认关闭 WiFi 省电；--no-powersave 可跳过
 NO_DEPS=0               # --no-deps: 完全不碰 apt（跳过依赖安装）
+DISPLAY_ONLY=0          # --display-only: 只装/更新屏幕界面，不动播放器
 DISPLAY_BIN=""          # --display-bin: 直接用预编译 showtime 二进制（无需源码/编译）
 CLIENT_BIN=""           # --client-bin: 直接用预编译 sendspin-client（跳过 clone/补丁/编译）
 CLIENT_BIN_FILE=""      # 校验通过后的实际文件（本地路径或下载到临时文件）
@@ -144,6 +145,9 @@ AkuBox Sendspin Client 安装脚本
                          要求同型号 + 同发行版（glibc/GLIBCXX 一致），脚本会校验。
   --no-powersave         不关闭 WiFi 省电
                          （默认会关闭，见下方「为什么要关 WiFi 省电」）
+  --display-only         只安装/更新屏幕界面，不动播放器、不碰声卡服务。
+                         用于只改了显示（例如加了 WiFi 图标）想单独更新的场景。
+                         会顺带检查 alsa-utils（屏幕要显示音量）与屏幕字体。
   --no-deps              完全不碰 apt：跳过依赖安装，直接按现有环境装。
                          预编译模式下通常只缺 avahi-utils；缺运行库会在校验阶段报出来。
   --skip-legacy-ma-patch 不应用 MA 2.10.x 兼容补丁（仅当 MA >= 2.11 / aiosendspin 10.x）
@@ -187,6 +191,7 @@ while [ $# -gt 0 ]; do
     --client-bin)          CLIENT_BIN="${2:?--client-bin 需要路径或 URL}"; shift 2 ;;
     --no-powersave)        NO_POWERSAVE=1; shift ;;
     --no-deps)             NO_DEPS=1; shift ;;
+    --display-only)        DISPLAY_ONLY=1; WITH_DISPLAY=1; shift ;;
     --skip-legacy-ma-patch) SKIP_LEGACY_PATCH=1; shift ;;
     --free-audio)          FREE_AUDIO=1; shift ;;
     --free-audio-services)
@@ -949,6 +954,26 @@ summary() {
 EOF
 }
 
+# ---------------------------- 仅安装屏幕界面 ----------------------------
+# 只改显示（比如新增 WiFi 图标）时用：不动播放器、不碰声卡、不重启 sendspin。
+run_display_only() {
+  hr; log "仅安装屏幕界面（播放器不动）"
+  if [ "${NO_DEPS:-0}" -eq 0 ] && ! dpkg -s alsa-utils >/dev/null 2>&1; then
+    log "  安装 alsa-utils（屏幕要显示音量，需要 amixer）"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq || warn "apt-get update 失败，继续"
+    apt-get install -y --no-install-recommends alsa-utils >/dev/null 2>&1 \
+      || warn "alsa-utils 安装失败（音量可能显示 0）"
+  fi
+  install_display
+  hr
+  if systemctl cat showtime.service >/dev/null 2>&1; then
+    printf '    showtime: %s / %s\n' \
+      "$(systemctl is-enabled showtime 2>/dev/null)" "$(systemctl is-active showtime 2>/dev/null)"
+  fi
+  ok "屏幕界面已就位（播放器与声卡未改动）"
+}
+
 # ---------------------------- 屏幕界面：黑胶播放页 + 时钟页 ----------------------------
 install_display() {
   hr; log "安装屏幕界面（黑胶播放页 + 时钟页）"
@@ -1000,6 +1025,11 @@ main() {
   printf '%s\n' "======================================================================"
 
   preflight
+  # 只装屏幕：跳过设备名/依赖/声卡/播放器全部流程
+  if [ "$DISPLAY_ONLY" -eq 1 ]; then
+    run_display_only
+    exit 0
+  fi
   interactive_name_step
   # 先判定客户端来源：预编译模式只需运行期依赖，不必拉 cmake/开发包
   decide_client_source

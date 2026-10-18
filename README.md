@@ -22,7 +22,7 @@
 | 播放页 | 封面圆形旋转，130px 直径、24°/秒（约 15 秒一圈）、30fps 双线性采样 |
 | 暂停/停止 | **立即停转**并停在当前角度（不清零），再播接着转，像被手按住又放开 |
 | 时钟页 | 时间用大字号撑高再水平压窄（瘦高，实测 141×91），**白色**；日期星期已移除 |
-| 顶部状态行 | `vol:NN%` / 充电图标 / 电量 `NN%` |
+| 顶部状态行 | `vol:NN%` / **WiFi 连接图标** / 充电图标 / 电量 `NN%` |
 | CPU | 播放页 16-17%、时钟页几乎 0（这块屏在单核 1GHz 上很吃 CPU，已专门优化） |
 
 ---
@@ -77,6 +77,7 @@ sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
 | `--name "<名称>"` | 设备显示名（多台务必不同） |
 | `-y` | 全自动，不交互 |
 | `--no-deps` | 完全不碰 apt（跳过依赖安装） |
+| `--display-only` | **只装/更新屏幕界面**，不动播放器、不重启 `sendspin-client` |
 | `--no-display` | 只装播放器，不动屏幕 |
 | `--no-powersave` | 不关闭 WiFi 省电 |
 | `--client-bin <路径\|URL>` | 换成指定的播放器产物（默认用 `prebuilt/`） |
@@ -320,6 +321,11 @@ E sendspin.protocol: Invalid server player command
   对齐时要分别量可见行。
 - **字体是隐身依赖**：`showtime` 用相对路径 `./wwDigital.ttf` 加载，路径相对**进程 CWD**。
   所以字体、`showtime.sh`、`WorkingDirectory` 三者缺一不可（缺了就是“服务正常但没数字”）。
+- **WiFi 图标**：时钟页状态行的 4 格信号柱，位置 `x 52..69`、底部对齐可见行 24（在 `vol` 文字
+  与充电图标之间）。已连接画绿色实心（与状态行同色）、未连接整组变暗灰 `(70,70,70)`。
+  状态只读 `operstate` + `carrier` 两个 sysfs 文件，每帧两次 `fopen`、**不 fork** ——
+  这台 CPU 每帧 fork 的代价极高（见下面的性能一节）。本机 `/proc/net/wireless` 不可读，
+  所以不做信号强度分级，只区分「已连接 / 未连接」。
 - **封面**走 MA 的 imageproxy，统一请求 `size=160&fmt=png`（该接口只接受 80/160/256/512，
   且本机链接的是 libpng 而非 libjpeg），按 URL 哈希缓存在 `/tmp/showtime-cover-cache/`，
   面积平均缩放到 130×130；失败降级为深灰圆盘。

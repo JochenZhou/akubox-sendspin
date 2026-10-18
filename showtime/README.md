@@ -29,6 +29,11 @@
 
 ## 时钟页
 
+- **WiFi 连接图标**：状态行 4 格信号柱（`x 52..69`，底部对齐可见行 24）。
+  已连接画绿色实心（与状态行同色）；未连接整组画暗灰 `(70,70,70)`，一眼看出没连上。
+  状态来自 `/sys/class/net/wlan0/operstate`（`up`）与 `carrier`（`1`），**只读 sysfs、不 fork**
+  —— 这台 CPU 每帧 fork 一次 `popen` 就够把单核吃满（历史教训见下方性能一节）。
+  本机 `/proc/net/wireless` 不可读，所以不做信号强度分级。
 - 时间用**高度优先**排版：字号 `TIME_FONT_SIZE = 100`（字形高约 91 行，几乎撑满状态行以下空间），
   再用 FreeType 的**水平变换矩阵**压窄到屏宽内 —— 实测自然宽 360 → 压缩 **43%** → 渲染 **141×91**。
   这是**非等比方放**（数字明显瘦高），因为宽度是硬约束：等比放大的上限就是原来那样，想更高只能压窄。
@@ -144,6 +149,7 @@ fp = popen(cmd, "r");        // 一次调用 = fork 4 个进程（sh + amixer + 
 【播放中】圆盘 130×130   x 16..146   行 0..130
 
 【空闲】  vol:NN%   x 1..46    行 15..24
+          WiFi 图标 x 52..69   行 12..24（4 格信号柱，已连接绿 / 未连接暗灰）
           充电图标  x 89..117  行 12..27（与电量百分比竖直中心对齐）
           电量 NN%  x 123..147 行 15..24
           时间      141×91     行 40..130（白色，冒号闪烁）
@@ -191,6 +197,9 @@ sudo bash install-showtime-nowplaying.sh
 ```bash
 # A. 预编译（默认）：仓库 prebuilt/showtime.armv7 存在就用它，约 5 秒
 sudo bash install-showtime-nowplaying.sh -y
+
+# 只更新屏幕、不碰播放器（在仓库根目录执行）
+sudo bash install.sh --display-only -y
 
 # 指定别的产物 / 字体
 sudo bash install-showtime-nowplaying.sh --bin /tmp/showtime.armv7 --font /tmp/wwDigital.ttf -y

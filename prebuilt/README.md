@@ -22,7 +22,7 @@ sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
 | 文件 | 大小 | md5 | 说明 |
 |---|---|---|---|
 | `sendspin-client.armv7` | 1161764 | `343a7a4a9094` | 上游 v0.5.2（`b3d209f9`）+ sendspin-cpp v0.9.4（`81216ba6`）打上 `patches/0001~0003` |
-| `showtime.armv7` | 29496 | `189993a416bd` | 厂商 `showtime.c`（27219 字节，md5 `275fc485…`）打上 `showtime/patches/showtime-nowplaying.patch` |
+| `showtime.armv7` | 29572 | `cd1ccb70a0da` | 厂商 `showtime.c`（27219 字节，md5 `275fc485…`）打上 `showtime/patches/showtime-nowplaying.patch`（含时钟页 WiFi 图标） |
 | `fonts/wwDigital.ttf` | 59612 | `a3e85aa95ea2` | 设备自带的显示字体 |
 
 在 `AKU R8-AkuBox`（Ubuntu 22.04.5 armhf / Kernel 6.1.9 / gcc 11.4.0）上编译，

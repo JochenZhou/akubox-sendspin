@@ -11,7 +11,7 @@
  #define VOLUME_MIN 0
  #define VOLUME_MAX 63
  // 帧缓冲结构体
-@@ -669,6 +673,287 @@
+@@ -669,7 +673,325 @@
  
  // (Place get_text_width function here or elsewhere appropriate)
  
@@ -297,9 +297,47 @@
 +}
 +
  // 显示时间和电池状态
++
++/* COMPAT (akubox): WiFi 连接状态图标。
++ * 只读 sysfs，绝不 fork —— 这台单核 CPU 每帧 fork 的代价极高（曾因每帧 popen 白烧 60% 单核）。
++ * 状态来源：operstate=up 且 carrier=1 视为已连接。
++ * 注：/proc/net/wireless 在本机不可读，因此不做信号强度分级，只区分「已连接 / 未连接」。 */
++static int wifi_is_connected(void) {
++    char buf[16];
++    FILE *f = fopen("/sys/class/net/wlan0/operstate", "r");
++    if (f == NULL) return 0;
++    if (fgets(buf, sizeof(buf), f) == NULL) { fclose(f); return 0; }
++    fclose(f);
++    if (strncmp(buf, "up", 2) != 0) return 0;
++    f = fopen("/sys/class/net/wlan0/carrier", "r");
++    if (f == NULL) return 1;                 /* 拿不到 carrier 时按 operstate 判断 */
++    int c = fgetc(f);
++    fclose(f);
++    return c == '1';
++}
++
++/* 4 格信号柱（宽 3px、间隔 2px，共 18px）；未连接时整组画暗灰，一眼看出没连上 */
++static void draw_wifi_icon(FrameBuffer *fb, int x, int bottom_visible_row,
++                           unsigned char r, unsigned char g, unsigned char b) {
++    static const int heights[4] = {4, 7, 10, 13};
++    const int bar_w = 3, gap = 2;
++    int connected = wifi_is_connected();
++    for (int i = 0; i < 4; i++) {
++        int bx = x + i * (bar_w + gap);
++        for (int dy = 0; dy < heights[i]; dy++) {
++            int code_y = (fb->height - 1) - (bottom_visible_row - dy);
++            for (int dx = 0; dx < bar_w; dx++) {
++                if (connected) fb_write_pixel(fb, bx + dx, code_y, r, g, b);
++                else           fb_write_pixel(fb, bx + dx, code_y, 70, 70, 70);
++            }
++        }
++    }
++}
++
  void show_time_and_battery(FrameBuffer *fb, FontRenderer *fr, Image *charging_icon, Image *battery_icon) {
      time_t now;
-@@ -678,7 +963,6 @@
+     struct tm *tm_now;
+@@ -678,7 +1000,6 @@
      char minute_str[3];   // For "MM"
      const char *colon_str = ":";
      
@@ -307,7 +345,7 @@
      char battery_status[32];
      char vol_status[32]; // Assuming you meant to use this if declared
      int battery_capacity;
-@@ -699,8 +983,6 @@
+@@ -699,8 +1020,6 @@
          
          static int show_colon_for_time = 0; // Show colon on even seconds
          show_colon_for_time = !show_colon_for_time;
@@ -316,7 +354,7 @@
          
          if (read_battery_status(battery_status, &battery_capacity) == 0) {
              snprintf(capacity_str, sizeof(capacity_str), "%d%%", battery_capacity);
-@@ -709,46 +991,117 @@
+@@ -709,46 +1028,117 @@
              strcpy(capacity_str, "N/A");
          }
          
@@ -426,12 +464,12 @@
 +        int width_mm = get_text_width(fr, minute_str, time_font_size_val, time_is_chinese);
 +        int time_base_x = (fb->width - (width_hh + width_colon + width_mm)) / 2;
 +        if (time_base_x < 0) time_base_x = 0;
- 
--        // 4. Conditionally draw Colon ":"
++
 +        // 1. Draw Hour "HH"
 +        draw_text(fb, fr, hour_str, time_base_x, time_y_coord,
 +                  time_color_r, time_color_g, time_color_b, time_font_size_val, time_is_chinese);
-+
+ 
+-        // 4. Conditionally draw Colon ":"
 +        // 2. 冒号（闪烁时也不占位变化，MM 位置稳定）
 +        int current_draw_x = time_base_x + width_hh;
          if (show_colon_for_time) {
@@ -459,8 +497,12 @@
          
          int battery_x = fb->width - 100;
          int battery_y = 30;
-@@ -766,17 +1119,49 @@
+@@ -764,19 +1154,53 @@
+         
+         draw_text(fb, fr, capacity_str, battery_x + 60, battery_y + 65, r_batt, g_batt, b_batt, 11, 0);
          draw_text(fb, fr, capacity_str_vol, 0, battery_y + 65, r_batt, g_batt, b_batt, 11, 0); // Assuming same color for volume
++          /* COMPAT (akubox): WiFi 连接图标，位于 vol 文字(x1..46) 与充电图标(x89..) 之间 */
++          draw_wifi_icon(fb, 52, 24, r_batt, g_batt, b_batt);
          
          if (strcmp(battery_status, "Charging") == 0 && charging_icon) {
 -            draw_image(fb, charging_icon, 70, battery_y + 65);
