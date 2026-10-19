@@ -97,6 +97,7 @@ fi
 log()  { printf '%s[*]%s %s\n'  "$C_BLU" "$C_OFF" "$*"; }
 ok()   { printf '%s[✓]%s %s\n'  "$C_GRN" "$C_OFF" "$*"; }
 warn() { printf '%s[!]%s %s\n'  "$C_YEL" "$C_OFF" "$*" >&2; }
+bad()  { printf '%s[✗]%s %s\n'  "$C_RED" "$C_OFF" "$*" >&2; }
 die()  { printf '%s[✗]%s %s\n'  "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 hr()   { printf '%s\n' "------------------------------------------------------------------------"; }
 
@@ -510,6 +511,18 @@ avahi_wait_ready() {
   return 1
 }
 
+# 用户拒绝改主机名时，红字把后果说清楚（不是危言耸听：真机上已真实发生过该故障）
+warn_hostname_skipped() {
+  local target="$1" cur
+  cur="$(hostname 2>/dev/null || echo akubox)"
+  bad "已跳过改主机名（保持 ${cur}）"
+  bad "后果：同网里其它 AkuBox 也叫 akubox 时，两台会互相抢 ${cur}.local —— avahi 改名期间会"
+  bad "      「Withdrawing address record」，mDNS 服务注册可能失效，表现为这台设备在"
+  bad "      Music Assistant 里时有时无、或根本发现不到（.176/.180 都实际发生过）。"
+  bad "要消除隐患，跑这一条："
+  bad "      hostnamectl set-hostname ${target} && systemctl restart avahi-daemon && systemctl restart ${SERVICE_NAME}"
+}
+
 fix_unique_hostname() {
   hr; log "唯一主机名（避免多台 AkuBox 互抢 akubox.local）"
   if [ "${NO_HOSTNAME:-0}" -eq 1 ]; then
@@ -548,12 +561,12 @@ fix_unique_hostname() {
   # 交互模式：由用户输入 y 确认；非交互（-y）不改，避免无提示地改动系统
   if [ -z "${HOSTNAME_ARG:-}" ]; then
     if [ "${INTERACTIVE:-0}" -ne 1 ]; then
-      warn "非交互模式（-y）不改主机名。要改请加: --hostname ${target}"
+      warn "非交互模式（-y）不改主机名；要改请加: --hostname ${target}"
+      warn_hostname_skipped "$target"
       return 0
     fi
     if ! yes_no "多台 AkuBox 同名会互相抢 mDNS 名（可能让 MA 发现不到本机），是否把主机名改为 ${target}?"; then
-      warn "已跳过 —— 若本机在 MA 里时有时无，先执行："
-      warn "  hostnamectl set-hostname ${target} && systemctl restart avahi-daemon && systemctl restart ${SERVICE_NAME}"
+      warn_hostname_skipped "$target"
       return 0
     fi
   fi

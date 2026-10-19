@@ -64,7 +64,7 @@ sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
 
 > 第 4 步默认建议改成 `akubox-<IP末段>`。出厂主机名都叫 `akubox`，多台同网时会互相抢
 > `akubox.local`，导致 avahi 改名/撤回记录、客户端注册丢失、**MA 里时有时无**（真机踩过）。
-> 用 `-y` 全自动模式时不会改（脚本「不询问就不改系统」的一贯做法），要改加 `--hostname akubox-176`。
+> 用 `-y` 全自动模式或直接回答 `n` 时**不会强行改**，脚本会用**红字打印后果与补救命令**。
 
 装完你会看到类似输出：
 
