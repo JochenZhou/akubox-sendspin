@@ -54,12 +54,17 @@ sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
 不加 `-y` 会进入交互向导，逐步让你确认。GitHub 慢的话，可以先在自己电脑上 clone 再
 `scp -r` 传过去 —— 脚本只依赖这个目录本身。
 
-**这一条命令做了四件事**：
+**这一条命令做了这些**：
 
 1. 装播放器 `sendspin-client`（用仓库 `prebuilt/` 里的产物，**不编译**）
 2. 关闭 WiFi 省电（避免设备间歇性“失联”，见 [FAQ](#五常见问题)）
 3. 装屏幕界面 `showtime`（黑胶播放页 + 时钟页，含字体）
-4. 启动服务并自检（监听 8928、mDNS 广播、屏幕服务状态）
+4. **问你要不要改主机名**（多台同网必须唯一，见下方注）—— 输入 `y` 才改
+5. 启动服务并自检（监听 8928、mDNS 广播、屏幕服务状态）
+
+> 第 4 步默认建议改成 `akubox-<IP末段>`。出厂主机名都叫 `akubox`，多台同网时会互相抢
+> `akubox.local`，导致 avahi 改名/撤回记录、客户端注册丢失、**MA 里时有时无**（真机踩过）。
+> 用 `-y` 全自动模式时不会改（脚本「不询问就不改系统」的一贯做法），要改加 `--hostname akubox-176`。
 
 装完你会看到类似输出：
 
@@ -78,6 +83,9 @@ sudo bash /tmp/akubox-sendspin/install.sh --name "客厅 AkuBox" -y
 | `-y` | 全自动，不交互 |
 | `--no-deps` | 完全不碰 apt（跳过依赖安装） |
 | `--display-only` | **只装/更新屏幕界面**，不动播放器、不重启 `sendspin-client` |
+| `--hostname <名字>` | 指定 mDNS 主机名（默认 `akubox-<IP末段>`），多台同网必须唯一 |
+| `--no-hostname` | 不改主机名 |
+| `--hostname-only` | 只处理主机名（改完重启 avahi 与客户端），修已装好的设备 |
 | `--no-display` | 只装播放器，不动屏幕 |
 | `--no-powersave` | 不关闭 WiFi 省电 |
 | `--client-bin <路径\|URL>` | 换成指定的播放器产物（默认用 `prebuilt/`） |
@@ -198,7 +206,37 @@ avahi-browse -rt _sendspin._tcp | grep -A4 AkuBox
 - **主机名能解析、但 `_sendspin._tcp` 里没有这台设备** → 客户端注册 mDNS 服务时静默失败了。
   原因几乎总是「avahi 和客户端被**同时**重启」——客户端抢在 avahi 就绪前注册，Bonjour 兼容层不报错。
   **修法：只重启客户端**（`systemctl restart sendspin-client`），绝不要连 avahi 一起重启。
+
 - **服务根本没起来 / 没监听 8928** → 看 `journalctl -u sendspin-client -n 50`。
+
+**还有一个高频根因：多台设备主机名相同。**
+
+出厂主机名都叫 `akubox`。同网第二台开始，avahi 会改名并撤回地址记录：
+
+```
+19:02:50  Host name conflict, retrying with akubox-2
+19:02:51  Withdrawing address record for 192.168.101.176 on wlan0.
+19:02:53  Server startup complete. Host name is akubox-3.local.
+```
+
+客户端如果正好在这个窗口注册服务，SRV 指向的主机名被撤回 → **服务条目失效，MA 永远发现不到**。
+症状很有欺骗性：服务 active、8928 在听、日志里还有 `mDNS: Advertising ...`，就是看不到。
+
+先确认：
+
+```bash
+hostname                                   # 都叫 akubox 就是撞了
+journalctl -u avahi-daemon | grep -c "Host name conflict"    # >0 就是撞了
+```
+
+修法（装的时候就该做）：给每台设备唯一主机名。一键脚本会在交互模式提示你确认，默认用 IP 末段：
+
+```bash
+sudo bash install.sh --hostname-only          # 交互确认后改成 akubox-<IP末段>
+sudo bash install.sh --hostname akubox-176     # 直接指定，不问
+```
+
+改完 avahi 会以 `akubox-176.local` 稳定发布，冲突次数归零，`ssh akubox-176.local` 也能直连。
 
 ### Q2：设备 ping 不通、SSH 连不上，但它自己能上网
 
